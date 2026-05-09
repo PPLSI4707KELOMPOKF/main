@@ -3,11 +3,6 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\ChatController;
 
-<<<<<<< Updated upstream
-Route::get('/', function () {
-    return view('welcome');
-});
-=======
 /*
 |--------------------------------------------------------------------------
 | Web Routes - LENTRA AI
@@ -27,4 +22,3 @@ Route::get('/chat/switch/{sessionId}', [ChatController::class, 'switchSession'])
 
 // PBI-2: Validasi input pertanyaan pengguna (realtime check)
 Route::post('/chat/validate-input', [ChatController::class, 'validateInput'])->name('chat.validate-input');
->>>>>>> Stashed changes
