@@ -58,22 +58,13 @@ class SendMessageRequest extends FormRequest
 
     /**
      * Preprocessing: bersihkan dan normalisasi input sebelum validasi.
-     * PBI-2: sanitasi dan normalisasi teks pertanyaan pengguna.
+     * PBI-3: sanitasi dan normalisasi teks pertanyaan pengguna melalui InputPreprocessor.
      */
     protected function prepareForValidation(): void
     {
         if ($this->has('message')) {
-            $cleaned = $this->input('message');
-
-            // Hapus karakter kontrol (kecuali newline & tab)
-            $cleaned = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $cleaned);
-
-            // Normalisasi multiple whitespace/newline menjadi satu
-            $cleaned = preg_replace('/\n{3,}/', "\n\n", $cleaned);
-            $cleaned = preg_replace('/[ \t]+/', ' ', $cleaned);
-
-            // Trim spasi di awal dan akhir
-            $cleaned = trim($cleaned);
+            $preprocessor = app(\App\Services\InputPreprocessor::class);
+            $cleaned = $preprocessor->clean($this->input('message'));
 
             $this->merge(['message' => $cleaned]);
         }
