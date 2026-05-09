@@ -198,10 +198,10 @@
         </button>
       </div>
 
-      {{-- Input --}}
+      {{-- Input (PBI-2: dengan char counter, hint, dan error) --}}
       <div class="chat-input-wrapper">
         <form id="chatForm" onsubmit="sendMessage(event)">
-          <div class="chat-input-box">
+          <div class="chat-input-box" id="chatInputBox">
             <textarea
               id="chatInput"
               class="chat-input"
@@ -209,11 +209,21 @@
               rows="1"
               maxlength="2000"
               onkeydown="handleKey(event)"
-              oninput="autoResize(this)"
+              oninput="onChatInput(this)"
             ></textarea>
-            <button type="submit" class="send-btn" id="sendBtn" title="Kirim">
+            <button type="submit" class="send-btn" id="sendBtn" title="Kirim" disabled>
               ➤
             </button>
+          </div>
+
+          {{-- PBI-2: baris info di bawah input --}}
+          <div class="input-meta">
+            {{-- Error validasi --}}
+            <span id="inputError" class="input-error" style="display:none;"></span>
+            {{-- Hint relevansi kata kunci --}}
+            <span id="inputHint" class="input-hint" style="display:none;"></span>
+            {{-- Karakter counter --}}
+            <span id="charCounter" class="char-counter">0 / 2000</span>
           </div>
         </form>
         <p class="input-disclaimer">ℹ️ Jawaban dihasilkan oleh AI dan bersifat informatif, bukan nasihat hukum.</p>
@@ -248,6 +258,7 @@
     newSessionUrl: '{{ route("chat.new-session") }}',
     historyUrl: '{{ route("chat.history") }}',
     switchUrl: '{{ url("/chat/switch") }}',
+    validateUrl: '{{ route("chat.validate-input") }}',
     csrfToken: '{{ csrf_token() }}',
   };
 </script>

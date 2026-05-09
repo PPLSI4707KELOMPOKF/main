@@ -438,6 +438,46 @@ html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--s
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
+/* ── PBI-2: Input meta area (char counter, error, hint) ── */
+.input-meta {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 4px 0;
+  min-height: 18px;
+}
+
+/* Karakter counter */
+.char-counter {
+  margin-left: auto;
+  font-size: 10.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+  transition: color var(--transition);
+}
+.char-counter.warn   { color: #f59e0b; }
+.char-counter.danger { color: #ef4444; }
+
+/* Error validasi input */
+.input-error {
+  font-size: 11px; color: #ef4444;
+  display: flex; align-items: center; gap: 4px;
+  animation: fadeSlideIn 0.2s ease;
+}
+.input-error::before { content: '⚠ '; }
+
+/* Hint relevansi kata kunci */
+.input-hint {
+  font-size: 11px;
+  display: flex; align-items: center; gap: 4px;
+  animation: fadeSlideIn 0.2s ease;
+}
+.input-hint.relevant   { color: #34d399; }
+.input-hint.irrelevant { color: #94a3b8; }
+
+/* Input box: border merah saat ada error */
+.chat-input-box.has-error {
+  border-color: rgba(239,68,68,0.5);
+}
+
 @media (max-width: 768px) {
   .sidebar { display: none; }
   .hero-content h2 { font-size: 20px; }

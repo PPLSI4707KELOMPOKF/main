@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\ChatSession;
 use App\Models\ChatMessage;
+use App\Http\Requests\SendMessageRequest;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Http;
@@ -44,17 +45,59 @@ class ChatController extends Controller
     }
 
     /**
-     * Send a message and get AI response (PBI-1 Core).
+     * Validasi input pertanyaan pengguna secara realtime (PBI-2).
+     * Endpoint ini dipanggil frontend saat user mengetik (on-demand).
      */
-    public function sendMessage(Request $request)
+    public function validateInput(Request $request)
     {
         $request->validate([
-            'message' => 'required|string|max:2000',
-            'session_id' => 'required|string',
+            'message' => 'required|string|min:2|max:2000',
         ]);
 
-        $sessionId = $request->input('session_id');
-        $userMessage = trim($request->input('message'));
+        $message = trim($request->input('message'));
+        $length  = mb_strlen($message);
+
+        // Deteksi apakah pertanyaan mengandung kata kunci hukum lalu lintas
+        $keywords = [
+            'helm','tilang','stnk','sim','parkir','kecelakaan','lampu merah',
+            'rambu','kecepatan','sabuk','mabuk','narkoba','asuransi','kendaraan',
+            'motor','mobil','truk','bus','sepeda','jalan','lalu lintas','uu',
+            'undang','pasal','sanksi','denda','pidana','polisi','penegak',
+            'registrasi','surat','izin','mengemudi','pengemudi',
+        ];
+
+        $lowerMsg     = mb_strtolower($message);
+        $isRelevant   = false;
+        $matchedWords = [];
+
+        foreach ($keywords as $kw) {
+            if (str_contains($lowerMsg, $kw)) {
+                $isRelevant   = true;
+                $matchedWords[] = $kw;
+            }
+        }
+
+        return response()->json([
+            'valid'         => true,
+            'length'        => $length,
+            'max_length'    => 2000,
+            'is_relevant'   => $isRelevant,
+            'matched_words' => $matchedWords,
+            'hint'          => $isRelevant
+                ? 'Pertanyaan terdeteksi relevan dengan hukum lalu lintas.'
+                : 'Coba sertakan kata kunci seperti: helm, tilang, SIM, STNK, parkir, dll.',
+        ]);
+    }
+
+    /**
+     * Terima pertanyaan pengguna, validasi via SendMessageRequest (PBI-2),
+     * lalu kirim ke proses AI dan simpan ke database.
+     */
+    public function sendMessage(SendMessageRequest $request)
+    {
+        // Setelah SendMessageRequest, data sudah bersih & tervalidasi
+        $sessionId   = $request->input('session_id');
+        $userMessage = $request->input('message'); // sudah di-trim di prepareForValidation
 
         // Get or create chat session
         $chatSession = ChatSession::firstOrCreate(
@@ -75,7 +118,14 @@ class ChatController extends Controller
             'content' => $userMessage,
         ]);
 
-        // Process with AI (PBI-1: basic chatbot interface)
+        // PBI-2: log panjang karakter pertanyaan untuk monitoring
+        \Illuminate\Support\Facades\Log::info('[PBI-2] User question received', [
+            'session_id'  => $sessionId,
+            'char_count'  => mb_strlen($userMessage),
+            'word_count'  => str_word_count($userMessage),
+        ]);
+
+        // Proses dengan AI (diisi lebih lanjut di PBI-3 dst)
         $aiResponse = $this->processWithAI($userMessage, $chatSession);
 
         // Save AI response
@@ -182,8 +232,9 @@ class ChatController extends Controller
 
     /**
      * Process user message with AI.
-     * PBI-1: Basic chatbot interface that sends question to backend and receives response.
-     * Future PBIs will add RAG, embeddings, and Gemma 3 integration.
+     * PBI-1: Basic chatbot interface.
+     * PBI-2: Input sudah divalidasi & dibersihkan sebelum sampai sini.
+     * PBI-3 dst: akan menambahkan validasi lanjutan, RAG, Gemma 3.
      */
     private function processWithAI(string $userMessage, ChatSession $session): array
     {
