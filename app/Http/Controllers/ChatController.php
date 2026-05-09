@@ -45,7 +45,7 @@ class ChatController extends Controller
     }
 
     /**
-     * Validasi input pertanyaan pengguna secara realtime (PBI-2).
+     * Validasi input pertanyaan pengguna secara realtime (PBI-2 & PBI-3).
      * Endpoint ini dipanggil frontend saat user mengetik (on-demand).
      */
     public function validateInput(Request $request)
@@ -57,25 +57,12 @@ class ChatController extends Controller
         $message = trim($request->input('message'));
         $length  = mb_strlen($message);
 
-        // Deteksi apakah pertanyaan mengandung kata kunci hukum lalu lintas
-        $keywords = [
-            'helm','tilang','stnk','sim','parkir','kecelakaan','lampu merah',
-            'rambu','kecepatan','sabuk','mabuk','narkoba','asuransi','kendaraan',
-            'motor','mobil','truk','bus','sepeda','jalan','lalu lintas','uu',
-            'undang','pasal','sanksi','denda','pidana','polisi','penegak',
-            'registrasi','surat','izin','mengemudi','pengemudi',
-        ];
+        // PBI-3: Deteksi relevansi menggunakan InputPreprocessor
+        $preprocessor = app(\App\Services\InputPreprocessor::class);
+        $relevanceData = $preprocessor->checkRelevance($message);
 
-        $lowerMsg     = mb_strtolower($message);
-        $isRelevant   = false;
-        $matchedWords = [];
-
-        foreach ($keywords as $kw) {
-            if (str_contains($lowerMsg, $kw)) {
-                $isRelevant   = true;
-                $matchedWords[] = $kw;
-            }
-        }
+        $isRelevant   = $relevanceData['is_relevant'];
+        $matchedWords = $relevanceData['matched_words'];
 
         return response()->json([
             'valid'         => true,
