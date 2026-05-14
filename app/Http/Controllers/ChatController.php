@@ -225,6 +225,20 @@ class ChatController extends Controller
      */
     private function processWithAI(string $userMessage, ChatSession $session): array
     {
+        // PBI-3: Clean and preprocess user message
+        $preprocessor = app(\App\Services\InputPreprocessor::class);
+        $cleanedMessage = $preprocessor->clean($userMessage);
+
+        // PBI-4: Generate embedding query
+        $embeddingService = app(\App\Services\EmbeddingService::class);
+        $embedding = $embeddingService->generateEmbedding($cleanedMessage);
+        
+        if ($embedding) {
+            \Illuminate\Support\Facades\Log::info('[PBI-4] Successfully generated embedding in ChatController', [
+                'session_id' => $session->session_id,
+            ]);
+        }
+
         // PBI-1: Basic response system - interface scaffolding
         // The actual Gemma 3 + RAG pipeline will be added in PBI-2 through PBI-10
         
