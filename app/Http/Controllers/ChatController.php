@@ -237,6 +237,19 @@ class ChatController extends Controller
             \Illuminate\Support\Facades\Log::info('[PBI-4] Successfully generated embedding in ChatController', [
                 'session_id' => $session->session_id,
             ]);
+
+            // PBI-5: Pencarian Dokumen Regulasi (RAG)
+            $vectorDb = app(\App\Services\VectorDatabaseService::class);
+            $relevantDocs = $vectorDb->search($embedding, 2); // Ambil 2 dokumen paling relevan
+
+            if (!empty($relevantDocs)) {
+                \Illuminate\Support\Facades\Log::info('[PBI-5] Found relevant documents', [
+                    'session_id' => $session->session_id,
+                    'count' => count($relevantDocs),
+                    'top_score' => $relevantDocs[0]['score'],
+                    'top_pasal' => $relevantDocs[0]['metadata']['pasal'] ?? 'Unknown'
+                ]);
+            }
         }
 
         // PBI-1: Basic response system - interface scaffolding
