@@ -6,6 +6,7 @@ use Tests\TestCase;
 use App\Models\ChatSession;
 use App\Services\EmbeddingService;
 use App\Services\VectorDatabaseService;
+use App\Services\ContextBuilderService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Log;
@@ -56,7 +57,14 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
                 ->andReturn($fakeRelevantDocs);
         });
 
-        // 5. Mock Log to capture the correct log entry
+        // 5. Mock ContextBuilderService (PBI-7 integration)
+        $this->mock(ContextBuilderService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('build')
+                ->once()
+                ->andReturn('Mocked context prompt');
+        });
+
+        // 6. Mock Log to capture the correct log entry
         Log::shouldReceive('info')
             ->with('[PBI-2] User question received', \Mockery::any());
         
@@ -69,14 +77,13 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
                 return isset($data['top_k']) && $data['top_k'] === $topKLimit && $data['count'] === 1;
             }));
 
-        // 6. Make request to send message
+        // 7. Make request to send message
         $response = $this->postJson(route('chat.send'), [
             'session_id' => $uuid,
             'message' => 'apakah saya harus pakai helm?'
         ]);
 
-
-        // 7. Assertions
+        // 8. Assertions
         $response->assertStatus(200);
         $response->assertJsonPath('success', true);
         $response->assertJsonStructure([
@@ -87,3 +94,4 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
         ]);
     }
 }
+
