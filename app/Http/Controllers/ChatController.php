@@ -238,18 +238,26 @@ class ChatController extends Controller
                 'session_id' => $session->session_id,
             ]);
 
-            // PBI-5: Pencarian Dokumen Regulasi (RAG)
+            // PBI-6: Pengambilan Dokumen Relevan (Top-K)
+            $topK = config('rag.top_k', 3);
             $vectorDb = app(\App\Services\VectorDatabaseService::class);
-            $relevantDocs = $vectorDb->search($embedding, 2); // Ambil 2 dokumen paling relevan
+            $relevantDocs = $vectorDb->search($embedding, $topK);
 
             if (!empty($relevantDocs)) {
-                \Illuminate\Support\Facades\Log::info('[PBI-5] Found relevant documents', [
+                \Illuminate\Support\Facades\Log::info('[PBI-6] Retrieved relevant documents', [
                     'session_id' => $session->session_id,
                     'count' => count($relevantDocs),
                     'top_score' => $relevantDocs[0]['score'],
-                    'top_pasal' => $relevantDocs[0]['metadata']['pasal'] ?? 'Unknown'
+                    'top_pasal' => $relevantDocs[0]['metadata']['pasal'] ?? 'Unknown',
+                    'top_k' => $topK,
+                ]);
+            } else {
+                \Illuminate\Support\Facades\Log::info('[PBI-6] No relevant documents found', [
+                    'session_id' => $session->session_id,
+                    'top_k' => $topK,
                 ]);
             }
+
         }
 
         // PBI-1: Basic response system - interface scaffolding
