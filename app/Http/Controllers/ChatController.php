@@ -221,7 +221,10 @@ class ChatController extends Controller
      * Process user message with AI.
      * PBI-1: Basic chatbot interface.
      * PBI-2: Input sudah divalidasi & dibersihkan sebelum sampai sini.
-     * PBI-3 dst: akan menambahkan validasi lanjutan, RAG, Gemma 3.
+     * PBI-3: Preprocessing input.
+     * PBI-4: Generate embedding.
+     * PBI-5/6: Pencarian & pengambilan dokumen relevan.
+     * PBI-7: Penyusunan context.
      */
     private function processWithAI(string $userMessage, ChatSession $session): array
     {
@@ -232,7 +235,9 @@ class ChatController extends Controller
         // PBI-4: Generate embedding query
         $embeddingService = app(\App\Services\EmbeddingService::class);
         $embedding = $embeddingService->generateEmbedding($cleanedMessage);
-        
+
+        $relevantDocs = [];
+
         if ($embedding) {
             \Illuminate\Support\Facades\Log::info('[PBI-4] Successfully generated embedding in ChatController', [
                 'session_id' => $session->session_id,
@@ -257,18 +262,18 @@ class ChatController extends Controller
                     'top_k' => $topK,
                 ]);
             }
-
         }
 
-        // PBI-1: Basic response system - interface scaffolding
-        // The actual Gemma 3 + RAG pipeline will be added in PBI-2 through PBI-10
-        
+        // PBI-7: Penyusunan Context — gabungkan pertanyaan + dokumen hukum sebagai konteks AI
+        $contextBuilder = app(\App\Services\ContextBuilderService::class);
+        $context = $contextBuilder->build($cleanedMessage, $relevantDocs, $session);
+
         // Try to connect to Ollama if available
         try {
             $ollamaUrl = env('OLLAMA_URL', 'http://localhost:11434');
             $response = Http::timeout(30)->post("{$ollamaUrl}/api/generate", [
                 'model' => env('OLLAMA_MODEL', 'gemma3'),
-                'prompt' => $this->buildPrompt($userMessage, $session),
+                'prompt' => $context,
                 'stream' => false,
             ]);
 
@@ -294,26 +299,7 @@ class ChatController extends Controller
         return $this->getSimulatedResponse($userMessage);
     }
 
-    /**
-     * Build prompt for AI model.
-     */
-    private function buildPrompt(string $userMessage, ChatSession $session): string
-    {
-        $context = "Anda adalah LENTRA AI, asisten hukum lalu lintas Indonesia yang cerdas dan membantu. " .
-            "Anda ahli dalam UU No. 22 Tahun 2009 tentang Lalu Lintas dan Angkutan Jalan. " .
-            "Berikan jawaban yang akurat, informatif, dan mudah dipahami. " .
-            "Selalu sebutkan pasal yang relevan dan sanksi yang berlaku jika ada.\n\n";
 
-        // Add conversation history
-        $history = $session->messages()->orderBy('created_at', 'desc')->limit(6)->get()->reverse();
-        foreach ($history as $msg) {
-            $role = $msg->role === 'user' ? 'User' : 'LENTRA AI';
-            $context .= "{$role}: {$msg->content}\n";
-        }
-
-        $context .= "\nUser: {$userMessage}\nLENTRA AI:";
-        return $context;
-    }
 
     /**
      * Extract pasal reference from AI response.
