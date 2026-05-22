@@ -16,8 +16,8 @@ class EmbeddingService
     public function generateEmbedding(string $text): ?array
     {
         try {
-            $ollamaUrl = env('OLLAMA_URL', 'http://localhost:11434');
-            $model = env('OLLAMA_EMBEDDING_MODEL', 'nomic-embed-text');
+            $ollamaUrl = rtrim(config('ollama.base_url', 'http://127.0.0.1:11434'), '/');
+            $model = config('ollama.embedding_model', 'nomic-embed-text');
 
             $response = Http::timeout(30)->post("{$ollamaUrl}/api/embeddings", [
                 'model' => $model,

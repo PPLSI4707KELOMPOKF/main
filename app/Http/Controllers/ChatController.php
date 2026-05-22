@@ -5,18 +5,28 @@ namespace App\Http\Controllers;
 use App\Models\ChatSession;
 use App\Models\ChatMessage;
 use App\Http\Requests\SendMessageRequest;
+use App\Services\OllamaService;
+use App\Services\ContextBuilderService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
-use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class ChatController extends Controller
 {
+    protected OllamaService $ollamaService;
+    protected ContextBuilderService $contextBuilder;
+
+    public function __construct(OllamaService $ollamaService, ContextBuilderService $contextBuilder)
+    {
+        $this->ollamaService  = $ollamaService;
+        $this->contextBuilder = $contextBuilder;
+    }
+
     /**
      * Display the main chat interface (PBI-1).
      */
     public function index(Request $request)
     {
-        // Get or create a session ID for guest users
         $sessionId = $request->session()->get('chat_session_id');
 
         if (!$sessionId) {
@@ -24,16 +34,13 @@ class ChatController extends Controller
             $request->session()->put('chat_session_id', $sessionId);
         }
 
-        // Get or create the chat session
         $chatSession = ChatSession::firstOrCreate(
             ['session_id' => $sessionId],
             ['title' => 'Percakapan Baru', 'user_id' => null]
         );
 
-        // Load all messages for this session
         $messages = $chatSession->messages()->get();
 
-        // Get all sessions for history sidebar
         $allSessions = ChatSession::where('session_id', $sessionId)
             ->orWhereNull('user_id')
             ->with('messages')
@@ -46,7 +53,6 @@ class ChatController extends Controller
 
     /**
      * Validasi input pertanyaan pengguna secara realtime (PBI-2 & PBI-3).
-     * Endpoint ini dipanggil frontend saat user mengetik (on-demand).
      */
     public function validateInput(Request $request)
     {
@@ -57,7 +63,6 @@ class ChatController extends Controller
         $message = trim($request->input('message'));
         $length  = mb_strlen($message);
 
-        // PBI-3: Deteksi relevansi menggunakan InputPreprocessor
         $preprocessor = app(\App\Services\InputPreprocessor::class);
         $relevanceData = $preprocessor->checkRelevance($message);
 
@@ -78,13 +83,12 @@ class ChatController extends Controller
 
     /**
      * Terima pertanyaan pengguna, validasi via SendMessageRequest (PBI-2),
-     * lalu kirim ke proses AI dan simpan ke database.
+     * lalu kirim ke OllamaService dan simpan ke database.
      */
     public function sendMessage(SendMessageRequest $request)
     {
-        // Setelah SendMessageRequest, data sudah bersih & tervalidasi
         $sessionId   = $request->input('session_id');
-        $userMessage = $request->input('message'); // sudah di-trim di prepareForValidation
+        $userMessage = $request->input('message');
 
         // Get or create chat session
         $chatSession = ChatSession::firstOrCreate(
@@ -92,7 +96,7 @@ class ChatController extends Controller
             ['title' => 'Percakapan Baru', 'user_id' => null]
         );
 
-        // Update title if this is the first message
+        // Update title if first message
         if ($chatSession->messages()->count() === 0) {
             $title = Str::limit($userMessage, 40);
             $chatSession->update(['title' => $title]);
@@ -105,21 +109,22 @@ class ChatController extends Controller
             'content' => $userMessage,
         ]);
 
-        // PBI-2: log panjang karakter pertanyaan untuk monitoring
-        \Illuminate\Support\Facades\Log::info('[PBI-2] User question received', [
+        Log::info('[PBI-2] User question received', [
             'session_id'  => $sessionId,
             'char_count'  => mb_strlen($userMessage),
             'word_count'  => str_word_count($userMessage),
         ]);
 
-        // Proses dengan AI (diisi lebih lanjut di PBI-3 dst)
+        // ========================================
+        // PIPELINE: PBI-3 → PBI-4 → PBI-6 → PBI-7 → OllamaService
+        // ========================================
         $aiResponse = $this->processWithAI($userMessage, $chatSession);
 
         // Save AI response
         $assistantMsg = ChatMessage::create([
             'chat_session_id' => $chatSession->id,
             'role' => 'assistant',
-            'content' => $aiResponse['content'],
+            'content' => $aiResponse['message'],
             'pasal' => $aiResponse['pasal'] ?? null,
             'sanksi' => $aiResponse['sanksi'] ?? null,
         ]);
@@ -142,6 +147,7 @@ class ChatController extends Controller
                 'sanksi' => $assistantMsg->sanksi,
                 'time' => $assistantMsg->created_at->format('H:i'),
             ],
+            'model' => $aiResponse['model'] ?? config('ollama.model'),
             'session_title' => $chatSession->title,
         ]);
     }
@@ -218,23 +224,46 @@ class ChatController extends Controller
     }
 
     /**
-     * Process user message with AI.
-     * PBI-1: Basic chatbot interface.
-     * PBI-2: Input sudah divalidasi & dibersihkan sebelum sampai sini.
-     * PBI-3 dst: akan menambahkan validasi lanjutan, RAG, Gemma 3.
+     * Cek status Ollama.
+     */
+    public function checkStatus()
+    {
+        $isAvailable = $this->ollamaService->isAvailable();
+        $models = $isAvailable ? $this->ollamaService->getAvailableModels() : [];
+
+        return response()->json([
+            'success'    => $isAvailable,
+            'available'  => $isAvailable,
+            'models'     => $models,
+            'message'    => $isAvailable
+                ? 'Ollama berjalan dengan baik.'
+                : 'Pastikan Ollama berjalan menggunakan command: ollama serve',
+        ]);
+    }
+
+    /**
+     * Process user message with full AI pipeline.
+     *
+     * PBI-3: Preprocessing input
+     * PBI-4: Generate embedding
+     * PBI-5/6: Pencarian & pengambilan dokumen relevan
+     * PBI-7: Penyusunan context
+     * OllamaService: Kirim ke AI dengan retry, fallback, anti-repeat
      */
     private function processWithAI(string $userMessage, ChatSession $session): array
     {
         // PBI-3: Clean and preprocess user message
-        $preprocessor = app(\App\Services\InputPreprocessor::class);
+        $preprocessor   = app(\App\Services\InputPreprocessor::class);
         $cleanedMessage = $preprocessor->clean($userMessage);
 
         // PBI-4: Generate embedding query
         $embeddingService = app(\App\Services\EmbeddingService::class);
         $embedding = $embeddingService->generateEmbedding($cleanedMessage);
-        
+
+        $relevantDocs = [];
+
         if ($embedding) {
-            \Illuminate\Support\Facades\Log::info('[PBI-4] Successfully generated embedding in ChatController', [
+            Log::info('[PBI-4] Successfully generated embedding in ChatController', [
                 'session_id' => $session->session_id,
             ]);
 
@@ -244,7 +273,7 @@ class ChatController extends Controller
             $relevantDocs = $vectorDb->search($embedding, $topK);
 
             if (!empty($relevantDocs)) {
-                \Illuminate\Support\Facades\Log::info('[PBI-6] Retrieved relevant documents', [
+                Log::info('[PBI-6] Retrieved relevant documents', [
                     'session_id' => $session->session_id,
                     'count' => count($relevantDocs),
                     'top_score' => $relevantDocs[0]['score'],
@@ -252,99 +281,53 @@ class ChatController extends Controller
                     'top_k' => $topK,
                 ]);
             } else {
-                \Illuminate\Support\Facades\Log::info('[PBI-6] No relevant documents found', [
+                Log::info('[PBI-6] No relevant documents found', [
                     'session_id' => $session->session_id,
                     'top_k' => $topK,
                 ]);
             }
-
         }
 
-        // PBI-1: Basic response system - interface scaffolding
-        // The actual Gemma 3 + RAG pipeline will be added in PBI-2 through PBI-10
-        
-        // Try to connect to Ollama if available
-        try {
-            $ollamaUrl = env('OLLAMA_URL', 'http://localhost:11434');
-            $response = Http::timeout(30)->post("{$ollamaUrl}/api/generate", [
-                'model' => env('OLLAMA_MODEL', 'gemma3'),
-                'prompt' => $this->buildPrompt($userMessage, $session),
-                'stream' => false,
+        // PBI-7: Penyusunan Context — RAG documents
+        $context = $this->contextBuilder->build($cleanedMessage, $relevantDocs, $session);
+
+        // Conversation history untuk OllamaService messages format
+        $conversationHistory = $this->contextBuilder->getConversationHistory($session);
+
+        // Kirim ke OllamaService (retry otomatis + fallback model + anti-repeat)
+        $result = $this->ollamaService->chat($cleanedMessage, $context, $conversationHistory);
+
+        Log::info('[OllamaService] Final response', [
+            'session_id' => $session->session_id,
+            'success'    => $result['success'],
+            'model'      => $result['model'],
+        ]);
+
+        // Jika AI gagal total, gunakan simulated response sebagai safety net
+        if (!$result['success']) {
+            Log::warning('[OllamaService] Using simulated fallback response', [
+                'session_id' => $session->session_id,
             ]);
-
-            if ($response->successful()) {
-                $data = $response->json();
-                $content = $data['response'] ?? '';
-                
-                // Parse pasal and sanksi from response
-                $pasal = $this->extractPasal($content);
-                $sanksi = $this->extractSanksi($content);
-
-                return [
-                    'content' => $content,
-                    'pasal' => $pasal,
-                    'sanksi' => $sanksi,
-                ];
-            }
-        } catch (\Exception $e) {
-            // Ollama not available, use simulated response
+            $simulated = $this->getSimulatedResponse($userMessage);
+            return [
+                'success' => true,
+                'message' => $simulated['content'],
+                'model'   => 'simulated',
+                'pasal'   => $simulated['pasal'],
+                'sanksi'  => $simulated['sanksi'],
+            ];
         }
 
-        // Simulated response for PBI-1 (interface demo)
-        return $this->getSimulatedResponse($userMessage);
+        return $result;
     }
 
     /**
-     * Build prompt for AI model.
-     */
-    private function buildPrompt(string $userMessage, ChatSession $session): string
-    {
-        $context = "Anda adalah LENTRA AI, asisten hukum lalu lintas Indonesia yang cerdas dan membantu. " .
-            "Anda ahli dalam UU No. 22 Tahun 2009 tentang Lalu Lintas dan Angkutan Jalan. " .
-            "Berikan jawaban yang akurat, informatif, dan mudah dipahami. " .
-            "Selalu sebutkan pasal yang relevan dan sanksi yang berlaku jika ada.\n\n";
-
-        // Add conversation history
-        $history = $session->messages()->orderBy('created_at', 'desc')->limit(6)->get()->reverse();
-        foreach ($history as $msg) {
-            $role = $msg->role === 'user' ? 'User' : 'LENTRA AI';
-            $context .= "{$role}: {$msg->content}\n";
-        }
-
-        $context .= "\nUser: {$userMessage}\nLENTRA AI:";
-        return $context;
-    }
-
-    /**
-     * Extract pasal reference from AI response.
-     */
-    private function extractPasal(string $content): ?string
-    {
-        if (preg_match('/[Pp]asal\s+(\d+[A-Za-z]?(?:\s*(?:ayat|huruf)\s*\([^)]+\))?)/u', $content, $matches)) {
-            return 'Pasal ' . $matches[1];
-        }
-        return null;
-    }
-
-    /**
-     * Extract sanksi/penalty from AI response.
-     */
-    private function extractSanksi(string $content): ?string
-    {
-        if (preg_match('/(?:pidana penjara|denda|kurungan)[^.]+\./u', $content, $matches)) {
-            return ucfirst(trim($matches[0]));
-        }
-        return null;
-    }
-
-    /**
-     * Get simulated response when AI is not available (PBI-1 demo mode).
+     * Get simulated response when AI is not available (safety net).
      */
     private function getSimulatedResponse(string $userMessage): array
     {
         $lowerMsg = strtolower($userMessage);
 
-        // Keyword-based responses for common traffic law questions
         if (str_contains($lowerMsg, 'helm')) {
             return [
                 'content' => 'Berdasarkan UU No. 22 Tahun 2009 tentang Lalu Lintas dan Angkutan Jalan, setiap pengemudi dan penumpang sepeda motor wajib menggunakan helm yang memenuhi Standar Nasional Indonesia (SNI). Kewajiban ini diatur dalam Pasal 57 ayat (1) UU LLAJ.',
@@ -387,7 +370,7 @@ class ChatController extends Controller
 
         if (str_contains($lowerMsg, 'kecelakaan')) {
             return [
-                'content' => 'Penanganan kecelakaan lalu lintas diatur dalam UU No. 22 Tahun 2009 Pasal 229-236. Setiap pengemudi yang terlibat kecelakaan wajib menghentikan kendaraan, menolong korban, dan melaporkan kepada pihak kepolisian. Meninggalkan korban kecelakaan dapat dikenakan sanksi pidana.',
+                'content' => 'Penanganan kecelakaan lalu lintas diatur dalam UU No. 22 Tahun 2009 Pasal 229-236. Setiap pengemudi yang terlibat kecelakaan wajib menghentikan kendaraan, menolong korban, dan melaporkan kepada pihak kepolisian.',
                 'pasal' => 'Pasal 229-236 UU No. 22 Tahun 2009',
                 'sanksi' => 'Pidana penjara paling lama 3 tahun atau denda paling banyak Rp 75.000.000',
             ];
@@ -395,16 +378,15 @@ class ChatController extends Controller
 
         if (str_contains($lowerMsg, 'lampu merah') || str_contains($lowerMsg, 'rambu')) {
             return [
-                'content' => 'Setiap pengemudi wajib mematuhi rambu-rambu lalu lintas, marka jalan, dan alat pemberi isyarat lalu lintas (lampu lalu lintas). Melanggar lampu merah diatur dalam Pasal 287 UU No. 22 Tahun 2009 dan dapat dikenakan sanksi.',
+                'content' => 'Setiap pengemudi wajib mematuhi rambu-rambu lalu lintas, marka jalan, dan alat pemberi isyarat lalu lintas. Melanggar lampu merah diatur dalam Pasal 287 UU No. 22 Tahun 2009.',
                 'pasal' => 'Pasal 287 UU No. 22 Tahun 2009',
                 'sanksi' => 'Pidana kurungan paling lama 2 bulan atau denda paling banyak Rp 500.000',
             ];
         }
 
-        // Default response
         return [
-            'content' => 'Ini adalah simulasi jawaban dari LENTRA AI. Jawaban yang sebenarnya akan merujuk pada undang-undang lalu lintas yang berlaku, khususnya UU No. 22 Tahun 2009 tentang Lalu Lintas dan Angkutan Jalan. Silakan tanyakan tentang helm, tilang, STNK, SIM, parkir, kecelakaan, atau lampu merah untuk mendapatkan informasi hukum yang lebih spesifik.',
-            'pasal' => 'Pasal Simulasi',
+            'content' => 'Mohon maaf, saat ini Lentra AI sedang dalam mode offline. Silakan pastikan Ollama berjalan dengan command: ollama serve. Atau tanyakan tentang helm, tilang, STNK, SIM, parkir, kecelakaan, atau lampu merah untuk mendapatkan informasi hukum lalu lintas.',
+            'pasal' => null,
             'sanksi' => null,
         ];
     }

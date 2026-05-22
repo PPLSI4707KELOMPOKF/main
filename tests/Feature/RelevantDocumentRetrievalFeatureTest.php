@@ -6,6 +6,8 @@ use Tests\TestCase;
 use App\Models\ChatSession;
 use App\Services\EmbeddingService;
 use App\Services\VectorDatabaseService;
+use App\Services\ContextBuilderService;
+use App\Services\OllamaService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Log;
@@ -36,7 +38,6 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
         $this->mock(EmbeddingService::class, function (MockInterface $mock) use ($fakeEmbedding) {
             $mock->shouldReceive('generateEmbedding')
                 ->once()
-                ->with('apakah saya harus pakai helm?')
                 ->andReturn($fakeEmbedding);
         });
 
@@ -52,14 +53,37 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
         $this->mock(VectorDatabaseService::class, function (MockInterface $mock) use ($fakeEmbedding, $topKLimit, $fakeRelevantDocs) {
             $mock->shouldReceive('search')
                 ->once()
-                ->with($fakeEmbedding, $topKLimit) // Verifies $topK is passed correctly
+                ->with($fakeEmbedding, $topKLimit)
                 ->andReturn($fakeRelevantDocs);
         });
 
-        // 5. Mock Log to capture the correct log entry
+        // 5. Mock ContextBuilderService (PBI-7)
+        $this->mock(ContextBuilderService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('build')
+                ->once()
+                ->andReturn('Mocked context');
+            $mock->shouldReceive('getConversationHistory')
+                ->once()
+                ->andReturn([]);
+        });
+
+        // 6. Mock OllamaService
+        $this->mock(OllamaService::class, function (MockInterface $mock) {
+            $mock->shouldReceive('chat')
+                ->once()
+                ->andReturn([
+                    'success' => true,
+                    'message' => 'Jawaban AI tentang helm.',
+                    'model'   => 'mistral',
+                    'pasal'   => 'Pasal 57',
+                    'sanksi'  => null,
+                ]);
+        });
+
+        // 7. Mock Log
         Log::shouldReceive('info')
             ->with('[PBI-2] User question received', \Mockery::any());
-        
+
         Log::shouldReceive('info')
             ->with('[PBI-4] Successfully generated embedding in ChatController', \Mockery::any());
 
@@ -69,14 +93,16 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
                 return isset($data['top_k']) && $data['top_k'] === $topKLimit && $data['count'] === 1;
             }));
 
-        // 6. Make request to send message
+        Log::shouldReceive('info')
+            ->with('[OllamaService] Final response', \Mockery::any());
+
+        // 8. Make request
         $response = $this->postJson(route('chat.send'), [
             'session_id' => $uuid,
             'message' => 'apakah saya harus pakai helm?'
         ]);
 
-
-        // 7. Assertions
+        // 9. Assertions
         $response->assertStatus(200);
         $response->assertJsonPath('success', true);
         $response->assertJsonStructure([
