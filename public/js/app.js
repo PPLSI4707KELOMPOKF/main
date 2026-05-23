@@ -171,7 +171,8 @@
   };
 
   /* ════════════════════════════════════════════════════════
-   * Send message (PBI-1 + PBI-2)
+   * Send message via SSE streaming (PBI-1 + PBI-2)
+   * Token Ollama langsung muncul real-time — tidak ada timeout
    * ════════════════════════════════════════════════════════ */
   window.sendMessage = async function (e) {
     e && e.preventDefault();
@@ -179,7 +180,7 @@
 
     const text = chatInput.value.trim();
 
-    // PBI-2: Validasi frontend sebelum kirim
+    // PBI-2: Validasi frontend
     const frontendErr = validateFrontend(text);
     if (frontendErr) {
       showInputError(frontendErr);
@@ -195,11 +196,10 @@
     chatInput.style.height = 'auto';
     updateCharCounter('');
 
-    // Sembunyikan empty state & hero
     if (emptyEl) emptyEl.style.display = 'none';
     if (heroEl)  heroEl.style.display  = 'none';
 
-    // Tampilkan bubble user secara optimistik
+    // Tampilkan bubble user
     appendMessage({ role: 'user', content: text, time: currentTime() });
     scrollBottom(true);
 
@@ -207,49 +207,109 @@
     typingEl.classList.add('show');
     scrollBottom(true);
 
-    try {
-      const res = await fetch(cfg.sendUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-TOKEN': cfg.csrfToken,
-          'Accept': 'application/json',
-        },
-        body: JSON.stringify({ message: text, session_id: currentSessionId }),
-      });
+    // Buat bubble AI kosong untuk diisi token streaming
+    const streamRow = document.createElement('div');
+    streamRow.className = 'message-row ai stream-row';
+    streamRow.innerHTML = `
+      <div class="msg-avatar ai-avatar">✨</div>
+      <div class="msg-body">
+        <div class="msg-header">
+          <span class="msg-name">LENTRA AI</span>
+          <span class="ai-badge">AI</span>
+          <span class="msg-time stream-time"></span>
+        </div>
+        <div class="msg-bubble ai stream-bubble"></div>
+        <div class="stream-refs"></div>
+      </div>`;
+    streamRow.style.display = 'none';
+    messagesEl.insertBefore(streamRow, typingEl);
 
-      // PBI-2: tangani response 422 (validation error dari backend)
-      if (res.status === 422) {
-        const errData = await res.json();
+    const streamBubble = streamRow.querySelector('.stream-bubble');
+    const streamTime   = streamRow.querySelector('.stream-time');
+    const streamRefs   = streamRow.querySelector('.stream-refs');
+
+    // Buka SSE stream
+    const params = new URLSearchParams({
+      session_id: currentSessionId,
+      message:    text,
+      _token:     cfg.csrfToken,
+    });
+
+    const streamUrl = (cfg.streamUrl || '/chat/stream') + '?' + params.toString();
+    const evtSource = new EventSource(streamUrl);
+
+    let receivedAny = false;
+    let streamContent = '';
+
+    evtSource.onmessage = function (ev) {
+      let data;
+      try { data = JSON.parse(ev.data); } catch { return; }
+
+      if (data.type === 'user_saved') {
+        // User message tersimpan — tampilkan AI bubble
         typingEl.classList.remove('show');
-        // Hapus bubble user yang sudah ditambahkan
-        const lastRow = messagesEl.querySelector('.message-row.user:last-of-type');
-        if (lastRow) lastRow.remove();
-        showInputError(errData.message || 'Input tidak valid.');
-        chatInput.value = text;
-        updateCharCounter(text);
-        return;
-      }
-
-      if (!res.ok) throw new Error('Server error ' + res.status);
-      const data = await res.json();
-
-      typingEl.classList.remove('show');
-
-      if (data.success) {
-        appendMessage(data.assistant_message);
+        streamRow.style.display = '';
         scrollBottom(true);
       }
-    } catch (err) {
+
+      if (data.type === 'token') {
+        receivedAny = true;
+        streamContent += data.token;
+        // Render token langsung ke bubble (escape HTML)
+        streamBubble.textContent = streamContent;
+        scrollBottom(false);
+      }
+
+      if (data.type === 'done') {
+        evtSource.close();
+
+        streamTime.textContent = data.time || currentTime();
+
+        // Tambah ref cards jika ada pasal/sanksi
+        let refsHtml = '';
+        if (data.pasal) {
+          refsHtml += `<div class="ref-card pasal">
+            <div class="ref-card-icon">📋</div>
+            <div class="ref-card-content">
+              <div class="ref-card-label">Pasal</div>
+              <div class="ref-card-value">${escHtml(data.pasal)}</div>
+            </div></div>`;
+        }
+        if (data.sanksi) {
+          refsHtml += `<div class="ref-card sanksi">
+            <div class="ref-card-icon">⚠️</div>
+            <div class="ref-card-content">
+              <div class="ref-card-label">Sanksi</div>
+              <div class="ref-card-value">${escHtml(data.sanksi)}</div>
+            </div></div>`;
+        }
+        if (refsHtml) {
+          streamRefs.className = 'ref-cards';
+          streamRefs.innerHTML = refsHtml;
+        }
+
+        isSending        = false;
+        sendBtn.disabled = false;
+        chatInput.focus();
+        scrollBottom(true);
+      }
+    };
+
+    evtSource.onerror = function () {
+      evtSource.close();
       typingEl.classList.remove('show');
-      showToast('❌ Gagal terhubung ke server. Coba lagi.');
-      console.error(err);
-    } finally {
+
+      if (!receivedAny) {
+        streamRow.remove();
+        showToast('❌ Gagal terhubung ke AI. Pastikan Ollama berjalan.');
+      }
+
       isSending        = false;
       sendBtn.disabled = false;
       chatInput.focus();
-    }
+    };
   };
+
 
   /* ── Quick topic button ── */
   window.sendQuickMessage = function (text) {

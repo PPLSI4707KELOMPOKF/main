@@ -255,6 +255,7 @@
   window.LENTRA = {
     sessionId: '{{ $sessionId }}',
     sendUrl: '{{ route("chat.send") }}',
+    streamUrl: '{{ route("chat.stream") }}',
     newSessionUrl: '{{ route("chat.new-session") }}',
     historyUrl: '{{ route("chat.history") }}',
     switchUrl: '{{ url("/chat/switch") }}',

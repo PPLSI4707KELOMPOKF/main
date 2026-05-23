@@ -87,6 +87,10 @@ class ChatController extends Controller
      */
     public function sendMessage(SendMessageRequest $request)
     {
+        // Naikkan batas waktu PHP untuk request AI (Ollama butuh 30-60 detik)
+        set_time_limit(300);
+        ini_set('max_execution_time', '300');
+
         $sessionId   = $request->input('session_id');
         $userMessage = $request->input('message');
 
@@ -149,6 +153,140 @@ class ChatController extends Controller
             ],
             'model' => $aiResponse['model'] ?? config('ollama.model'),
             'session_title' => $chatSession->title,
+        ]);
+    }
+
+
+    /**
+     * Stream jawaban AI ke browser via Server-Sent Events (SSE).
+     * Token langsung muncul di browser — tidak ada timeout.
+     */
+    public function streamMessage(Request $request)
+    {
+        set_time_limit(0);
+        ini_set('max_execution_time', '0');
+
+        $request->validate([
+            'session_id' => 'required|string',
+            'message'    => 'required|string|min:2|max:2000',
+        ]);
+
+        $sessionId   = $request->input('session_id');
+        $userMessage = $request->input('message');
+
+        $chatSession = ChatSession::firstOrCreate(
+            ['session_id' => $sessionId],
+            ['title' => 'Percakapan Baru', 'user_id' => null]
+        );
+
+        if ($chatSession->messages()->count() === 0) {
+            $chatSession->update(['title' => Str::limit($userMessage, 40)]);
+        }
+
+        $userMsg = ChatMessage::create([
+            'chat_session_id' => $chatSession->id,
+            'role'            => 'user',
+            'content'         => $userMessage,
+        ]);
+
+        $preprocessor     = app(\App\Services\InputPreprocessor::class);
+        $cleanedMessage   = $preprocessor->clean($userMessage);
+
+        // GUARD: Tolak pertanyaan di luar topik lalu lintas
+        $relevanceData = $preprocessor->checkRelevance($cleanedMessage);
+        if (!$relevanceData['is_relevant']) {
+            $rejectMsg = 'Maaf, saya hanya dapat membantu pertanyaan seputar hukum lalu lintas Indonesia. Silakan tanyakan tentang SIM, STNK, helm, tilang, rambu, parkir, atau aturan berkendara.';
+            $assistantMsg = ChatMessage::create([
+                'chat_session_id' => $chatSession->id,
+                'role'            => 'assistant',
+                'content'         => $rejectMsg,
+                'pasal'           => null,
+                'sanksi'          => null,
+            ]);
+            return response()->stream(function () use ($userMsg, $chatSession, $assistantMsg, $rejectMsg) {
+                echo "data: " . json_encode(['type' => 'user_saved', 'id' => $userMsg->id, 'time' => $userMsg->created_at->format('H:i'), 'session_title' => $chatSession->title]) . "\n\n";
+                ob_flush(); flush();
+                echo "data: " . json_encode(['type' => 'token', 'token' => $rejectMsg]) . "\n\n";
+                ob_flush(); flush();
+                echo "data: " . json_encode(['type' => 'done', 'id' => $assistantMsg->id, 'time' => $assistantMsg->created_at->format('H:i'), 'pasal' => null, 'sanksi' => null, 'success' => true]) . "\n\n";
+                ob_flush(); flush();
+            }, 200, ['Content-Type' => 'text/event-stream', 'Cache-Control' => 'no-cache', 'X-Accel-Buffering' => 'no']);
+        }
+
+        $embeddingService = app(\App\Services\EmbeddingService::class);
+        $embedding        = $embeddingService->generateEmbedding($cleanedMessage);
+
+        $relevantDocs = [];
+        if ($embedding) {
+            $topK = config('rag.top_k', 3);
+            $vectorDb = app(\App\Services\VectorDatabaseService::class);
+            $relevantDocs = $vectorDb->search($embedding, $topK);
+        }
+
+        $context             = $this->contextBuilder->build($cleanedMessage, $relevantDocs, $chatSession);
+        $conversationHistory = $this->contextBuilder->getConversationHistory($chatSession);
+        $ollamaService       = $this->ollamaService;
+
+        return response()->stream(function () use (
+            $ollamaService, $cleanedMessage, $context, $conversationHistory,
+            $chatSession, $userMsg
+        ) {
+            echo "data: " . json_encode([
+                'type'          => 'user_saved',
+                'id'            => $userMsg->id,
+                'time'          => $userMsg->created_at->format('H:i'),
+                'session_title' => $chatSession->title,
+            ]) . "\n\n";
+            ob_flush(); flush();
+
+            $fullContent = '';
+
+            $ollamaService->streamChat(
+                $cleanedMessage,
+                $context,
+                $conversationHistory,
+                function (string $token) use (&$fullContent) {
+                    $fullContent .= $token;
+                    echo "data: " . json_encode(['type' => 'token', 'token' => $token]) . "\n\n";
+                    ob_flush(); flush();
+                },
+                function (string $content, bool $success) use ($chatSession, &$fullContent) {
+                    $finalContent = $success ? $content : ($fullContent ?: 'Maaf, AI tidak dapat merespons. Pastikan Ollama berjalan.');
+
+                    $pasal = null;
+                    $sanksi = null;
+                    if (preg_match('/[Pp]asal\\s+(\\d+[A-Za-z]?(?:\\s*(?:ayat|huruf)\\s*\\([^)]+\\))?)/u', $finalContent, $m)) {
+                        $pasal = 'Pasal ' . $m[1];
+                    }
+                    if (preg_match('/(?:pidana penjara|denda|kurungan)[^.]+\\./u', $finalContent, $m)) {
+                        $sanksi = ucfirst(trim($m[0]));
+                    }
+
+                    $assistantMsg = ChatMessage::create([
+                        'chat_session_id' => $chatSession->id,
+                        'role'            => 'assistant',
+                        'content'         => $finalContent,
+                        'pasal'           => $pasal,
+                        'sanksi'          => $sanksi,
+                    ]);
+                    $chatSession->touch();
+
+                    echo "data: " . json_encode([
+                        'type'    => 'done',
+                        'id'      => $assistantMsg->id,
+                        'time'    => $assistantMsg->created_at->format('H:i'),
+                        'pasal'   => $pasal,
+                        'sanksi'  => $sanksi,
+                        'success' => $success,
+                    ]) . "\n\n";
+                    ob_flush(); flush();
+                }
+            );
+        }, 200, [
+            'Content-Type'      => 'text/event-stream',
+            'Cache-Control'     => 'no-cache',
+            'X-Accel-Buffering' => 'no',
+            'Connection'        => 'keep-alive',
         ]);
     }
 
@@ -255,6 +393,23 @@ class ChatController extends Controller
         // PBI-3: Clean and preprocess user message
         $preprocessor   = app(\App\Services\InputPreprocessor::class);
         $cleanedMessage = $preprocessor->clean($userMessage);
+
+        // GUARD: Cek relevansi SEBELUM panggil Ollama
+        // Jika pertanyaan tidak menyangkut lalu lintas → tolak langsung tanpa AI
+        $relevanceData = $preprocessor->checkRelevance($cleanedMessage);
+        if (!$relevanceData['is_relevant']) {
+            Log::info('[Guard] Off-topic question rejected', [
+                'session_id' => $session->session_id,
+                'message'    => mb_substr($cleanedMessage, 0, 80),
+            ]);
+            return [
+                'success' => true,
+                'message' => 'Maaf, saya hanya dapat membantu pertanyaan seputar hukum lalu lintas Indonesia. Silakan tanyakan tentang SIM, STNK, helm, tilang, rambu, parkir, atau aturan berkendara.',
+                'model'   => 'guard',
+                'pasal'   => null,
+                'sanksi'  => null,
+            ];
+        }
 
         // PBI-4: Generate embedding query
         $embeddingService = app(\App\Services\EmbeddingService::class);

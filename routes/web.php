@@ -19,8 +19,10 @@ Route::get('/', [ChatController::class, 'index'])->name('chat.index');
 // Chat API routes — rate limiting 10 req/menit (anti-spam)
 Route::middleware(['throttle:10,1'])->group(function () {
     Route::post('/chat/send', [ChatController::class, 'sendMessage'])->name('chat.send');
+    Route::get('/chat/stream', [ChatController::class, 'streamMessage'])->name('chat.stream');
     Route::post('/chat/validate-input', [ChatController::class, 'validateInput'])->name('chat.validate-input');
 });
+
 
 // Session management — rate limit lebih longgar (30 req/menit)
 Route::middleware(['throttle:30,1'])->group(function () {

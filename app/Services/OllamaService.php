@@ -89,10 +89,82 @@ class OllamaService
     }
 
     /**
+     * Stream respons AI ke browser via SSE — token dikirim langsung saat tersedia.
+     * Callback $onToken(string $token) dipanggil setiap token baru tiba.
+     * Callback $onDone(string $fullContent) dipanggil saat selesai.
+     */
+    public function streamChat(string $userMessage, string $context = '', array $conversationHistory = [], ?callable $onToken = null, ?callable $onDone = null): void
+    {
+        set_time_limit(0);
+
+        $messages = $this->buildMessages($userMessage, $context, $conversationHistory);
+
+        $payload = [
+            'model'    => $this->model,
+            'messages' => $messages,
+            'stream'   => true,
+            'options'  => [
+                'temperature'    => $this->temperature,
+                'top_p'          => $this->topP,
+                'repeat_penalty' => $this->repeatPenalty,
+                'num_predict'    => $this->numPredict,
+            ],
+        ];
+
+        $fullContent = '';
+        $success     = false;
+
+        try {
+            $ch = curl_init("{$this->baseUrl}/api/chat");
+            curl_setopt_array($ch, [
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => json_encode($payload),
+                CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+                CURLOPT_TIMEOUT        => 0,
+                CURLOPT_WRITEFUNCTION  => function ($curl, $data) use (&$fullContent, &$success, $onToken) {
+                    // Ollama stream mengirim satu JSON per baris
+                    $lines = explode("\n", $data);
+                    foreach ($lines as $line) {
+                        $line = trim($line);
+                        if (empty($line)) continue;
+                        $json = json_decode($line, true);
+                        if (!$json) continue;
+
+                        $token = $json['message']['content'] ?? '';
+                        if ($token !== '') {
+                            $fullContent .= $token;
+                            if ($onToken) {
+                                $onToken($token);
+                            }
+                        }
+
+                        if (!empty($json['done'])) {
+                            $success = true;
+                        }
+                    }
+                    return strlen($data);
+                },
+            ]);
+            curl_exec($ch);
+            curl_close($ch);
+        } catch (\Exception $e) {
+            Log::error('[OllamaService] Stream error', ['message' => $e->getMessage()]);
+        }
+
+        if ($onDone) {
+            $fullContent = $this->removeRepeatedContent($fullContent);
+            $onDone($success ? $fullContent : '', $success);
+        }
+    }
+
+    /**
      * Kirim HTTP request ke Ollama API /api/chat dengan retry otomatis.
      */
     protected function sendRequest(string $model, array $messages): array
     {
+        // Pastikan tidak timeout di PHP level saat menunggu LLM response
+        set_time_limit(0);
+
         $payload = [
             'model'    => $model,
             'messages' => $messages,
