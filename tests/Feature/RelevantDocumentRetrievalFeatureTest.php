@@ -113,3 +113,4 @@ class RelevantDocumentRetrievalFeatureTest extends TestCase
         ]);
     }
 }
+

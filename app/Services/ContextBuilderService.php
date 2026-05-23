@@ -55,7 +55,7 @@ class ContextBuilderService
     public function getConversationHistory(ChatSession $session): array
     {
         return $session->messages()
-            ->orderBy('created_at', 'desc')
+            ->reorder('created_at', 'desc')
             ->limit(6)
             ->get()
             ->reverse()
