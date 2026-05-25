@@ -7,6 +7,7 @@ use App\Models\ChatMessage;
 use App\Http\Requests\SendMessageRequest;
 use App\Services\OllamaService;
 use App\Services\ContextBuilderService;
+use App\Services\ApiResponseFormatter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
@@ -91,69 +92,90 @@ class ChatController extends Controller
         set_time_limit(300);
         ini_set('max_execution_time', '300');
 
-        $sessionId   = $request->input('session_id');
-        $userMessage = $request->input('message');
+        try {
+            $sessionId   = $request->input('session_id');
+            $userMessage = $request->input('message');
 
-        // Get or create chat session
-        $chatSession = ChatSession::firstOrCreate(
-            ['session_id' => $sessionId],
-            ['title' => 'Percakapan Baru', 'user_id' => null]
-        );
+            // Get or create chat session
+            $chatSession = ChatSession::firstOrCreate(
+                ['session_id' => $sessionId],
+                ['title' => 'Percakapan Baru', 'user_id' => null]
+            );
 
-        // Update title if first message
-        if ($chatSession->messages()->count() === 0) {
-            $title = Str::limit($userMessage, 40);
-            $chatSession->update(['title' => $title]);
-        }
+            // Update title if first message
+            if ($chatSession->messages()->count() === 0) {
+                $title = Str::limit($userMessage, 40);
+                $chatSession->update(['title' => $title]);
+            }
 
-        // Save user message
-        $userMsg = ChatMessage::create([
-            'chat_session_id' => $chatSession->id,
-            'role' => 'user',
-            'content' => $userMessage,
-        ]);
-
-        Log::info('[PBI-2] User question received', [
-            'session_id'  => $sessionId,
-            'char_count'  => mb_strlen($userMessage),
-            'word_count'  => str_word_count($userMessage),
-        ]);
-
-        // ========================================
-        // PIPELINE: PBI-3 → PBI-4 → PBI-6 → PBI-7 → OllamaService
-        // ========================================
-        $aiResponse = $this->processWithAI($userMessage, $chatSession);
-
-        // Save AI response
-        $assistantMsg = ChatMessage::create([
-            'chat_session_id' => $chatSession->id,
-            'role' => 'assistant',
-            'content' => $aiResponse['message'],
-            'pasal' => $aiResponse['pasal'] ?? null,
-            'sanksi' => $aiResponse['sanksi'] ?? null,
-        ]);
-
-        $chatSession->touch();
-
-        return response()->json([
-            'success' => true,
-            'user_message' => [
-                'id' => $userMsg->id,
+            // Save user message
+            $userMsg = ChatMessage::create([
+                'chat_session_id' => $chatSession->id,
                 'role' => 'user',
-                'content' => $userMsg->content,
-                'time' => $userMsg->created_at->format('H:i'),
-            ],
-            'assistant_message' => [
-                'id' => $assistantMsg->id,
+                'content' => $userMessage,
+            ]);
+
+            Log::info('[PBI-2] User question received', [
+                'session_id'  => $sessionId,
+                'char_count'  => mb_strlen($userMessage),
+                'word_count'  => str_word_count($userMessage),
+            ]);
+
+            // ========================================
+            // PIPELINE: PBI-3 → PBI-4 → PBI-6 → PBI-7 → OllamaService
+            // ========================================
+            $aiResponse = $this->processWithAI($userMessage, $chatSession);
+
+            // Save AI response
+            $assistantMsg = ChatMessage::create([
+                'chat_session_id' => $chatSession->id,
                 'role' => 'assistant',
-                'content' => $assistantMsg->content,
-                'pasal' => $assistantMsg->pasal,
-                'sanksi' => $assistantMsg->sanksi,
-                'time' => $assistantMsg->created_at->format('H:i'),
-            ],
-            'model' => $aiResponse['model'] ?? config('ollama.model'),
-            'session_title' => $chatSession->title,
-        ]);
+                'content' => $aiResponse['message'],
+                'pasal' => $aiResponse['pasal'] ?? null,
+                'sanksi' => $aiResponse['sanksi'] ?? null,
+            ]);
+
+            $chatSession->touch();
+
+            $modelName = $aiResponse['model'] ?? config('ollama.model');
+
+            $formatted = ApiResponseFormatter::formatSuccess(
+                $assistantMsg->content,
+                $modelName,
+                [
+                    'user_message' => [
+                        'id' => $userMsg->id,
+                        'role' => 'user',
+                        'content' => $userMsg->content,
+                        'time' => $userMsg->created_at->format('H:i'),
+                    ],
+                    'assistant_message' => [
+                        'id' => $assistantMsg->id,
+                        'role' => 'assistant',
+                        'content' => $assistantMsg->content,
+                        'pasal' => $assistantMsg->pasal,
+                        'sanksi' => $assistantMsg->sanksi,
+                        'time' => $assistantMsg->created_at->format('H:i'),
+                    ],
+                    'session_title' => $chatSession->title,
+                ]
+            );
+
+            return response()->json($formatted);
+
+        } catch (\Exception $e) {
+            Log::error('[PBI-10] Error in sendMessage endpoint', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            $errorResponse = ApiResponseFormatter::formatError(
+                'AI sedang tidak tersedia',
+                $e->getMessage()
+            );
+
+            return response()->json($errorResponse, 500);
+        }
     }
 
 
