@@ -246,6 +246,9 @@
       try { data = JSON.parse(ev.data); } catch { return; }
 
       if (data.type === 'user_saved') {
+        if (data.session_id) {
+          currentSessionId = data.session_id;
+        }
         // User message tersimpan — tampilkan AI bubble
         typingEl.classList.remove('show');
         streamRow.style.display = '';
@@ -265,24 +268,8 @@
 
         streamTime.textContent = data.time || currentTime();
 
-        // Tambah ref cards jika ada pasal/sanksi
-        let refsHtml = '';
-        if (data.pasal) {
-          refsHtml += `<div class="ref-card pasal">
-            <div class="ref-card-icon">📋</div>
-            <div class="ref-card-content">
-              <div class="ref-card-label">Pasal</div>
-              <div class="ref-card-value">${escHtml(data.pasal)}</div>
-            </div></div>`;
-        }
-        if (data.sanksi) {
-          refsHtml += `<div class="ref-card sanksi">
-            <div class="ref-card-icon">⚠️</div>
-            <div class="ref-card-content">
-              <div class="ref-card-label">Sanksi</div>
-              <div class="ref-card-value">${escHtml(data.sanksi)}</div>
-            </div></div>`;
-        }
+        // Tambah ref cards jika ada pasal/sanksi/sumber regulasi.
+        let refsHtml = renderReferenceCards(data);
         if (refsHtml) {
           streamRefs.className = 'ref-cards';
           streamRefs.innerHTML = refsHtml;
@@ -311,7 +298,15 @@
   };
 
 
-  /* ── Quick topic button ── */
+  /* ── Quick topic buttons ── */
+  window.sendTopicMessage = function (button, text) {
+    document.querySelectorAll('.topic-tag.active').forEach(tag => tag.classList.remove('active'));
+    if (button) {
+      button.classList.add('active');
+    }
+    sendQuickMessage(text);
+  };
+
   window.sendQuickMessage = function (text) {
     chatInput.value = text;
     updateCharCounter(text);
@@ -332,23 +327,7 @@
           <div class="msg-bubble user">${escHtml(msg.content)}</div>
         </div>`;
     } else {
-      let refs = '';
-      if (msg.pasal) {
-        refs += `<div class="ref-card pasal">
-          <div class="ref-card-icon">📋</div>
-          <div class="ref-card-content">
-            <div class="ref-card-label">Pasal</div>
-            <div class="ref-card-value">${escHtml(msg.pasal)}</div>
-          </div></div>`;
-      }
-      if (msg.sanksi) {
-        refs += `<div class="ref-card sanksi">
-          <div class="ref-card-icon">⚠️</div>
-          <div class="ref-card-content">
-            <div class="ref-card-label">Sanksi</div>
-            <div class="ref-card-value">${escHtml(msg.sanksi)}</div>
-          </div></div>`;
-      }
+      let refs = renderReferenceCards(msg);
       row.innerHTML = `
         <div class="msg-avatar ai-avatar">✨</div>
         <div class="msg-body">
@@ -368,23 +347,30 @@
   /* ── History Panel ── */
   window.toggleHistory = function (e) {
     e && e.preventDefault();
+    if (!cfg.isAuthenticated || !historyPanel) {
+      showToast('Login untuk melihat riwayat percakapan.');
+      return;
+    }
     historyPanel.classList.contains('open') ? closeHistory() : openHistory();
   };
 
   function openHistory() {
+    if (!historyPanel) return;
     historyPanel.classList.add('open');
     loadHistory();
   }
 
   window.closeHistory = function () {
+    if (!historyPanel) return;
     historyPanel.classList.remove('open');
   };
 
   window.closeHistoryOnBg = function (e) {
-    if (e.target === historyPanel) closeHistory();
+    if (historyPanel && e.target === historyPanel) closeHistory();
   };
 
   async function loadHistory() {
+    if (!cfg.historyUrl || !historyList) return;
     historyList.innerHTML = '<div class="history-empty">Memuat...</div>';
     try {
       const res  = await fetch(cfg.historyUrl, { headers: { 'Accept': 'application/json' } });
@@ -430,6 +416,12 @@
 
   /* ── New Chat ── */
   window.startNewChat = async function () {
+    if (!cfg.isAuthenticated) {
+      clearVisibleChat();
+      showToast('Percakapan sementara dibersihkan.');
+      return;
+    }
+
     try {
       const res  = await fetch(cfg.newSessionUrl, {
         method: 'POST',
@@ -458,6 +450,18 @@
     }
   };
 
+  function clearVisibleChat() {
+    const rows = messagesEl.querySelectorAll('.message-row:not(#typingIndicator)');
+    rows.forEach(r => r.remove());
+    if (emptyEl) { emptyEl.style.display = 'flex'; }
+    if (heroEl)  { heroEl.style.display  = ''; }
+    clearInputError();
+    hideInputHint();
+    updateCharCounter('');
+    closeHistory();
+    chatInput.focus();
+  }
+
   /* ── Helpers ── */
   function currentTime() {
     const d = new Date();
@@ -472,6 +476,45 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#039;');
+  }
+
+  function renderReferenceCards(data) {
+    const references = Array.isArray(data.references) ? data.references : [];
+    const firstReference = references[0] || {};
+    const pasal = data.pasal || firstReference.pasal;
+    const sanksi = data.sanksi || firstReference.sanksi;
+    const source = firstReference.source;
+    const title = firstReference.title;
+    const topic = firstReference.topic;
+
+    let refs = '';
+    if (pasal) {
+      refs += `<div class="ref-card pasal">
+        <div class="ref-card-icon">📋</div>
+        <div class="ref-card-content">
+          <div class="ref-card-label">Pasal</div>
+          <div class="ref-card-value">${escHtml(pasal)}</div>
+        </div></div>`;
+    }
+    if (sanksi) {
+      refs += `<div class="ref-card sanksi">
+        <div class="ref-card-icon">⚠️</div>
+        <div class="ref-card-content">
+          <div class="ref-card-label">Sanksi</div>
+          <div class="ref-card-value">${escHtml(sanksi)}</div>
+        </div></div>`;
+    }
+    if (source || title || topic) {
+      const sourceValue = [title, source, topic].filter(Boolean).join(' · ');
+      refs += `<div class="ref-card source-ref">
+        <div class="ref-card-icon">📚</div>
+        <div class="ref-card-content">
+          <div class="ref-card-label">Sumber Regulasi</div>
+          <div class="ref-card-value">${escHtml(sourceValue)}</div>
+        </div></div>`;
+    }
+
+    return refs;
   }
 
   /* ── Init ── */

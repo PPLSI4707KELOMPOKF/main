@@ -28,6 +28,7 @@
         </div>
         <span class="nav-arrow">›</span>
       </a>
+      @auth
       <a href="#" class="nav-item" id="nav-history" onclick="toggleHistory(event)">
         <span class="nav-item-icon">🕐</span>
         <div class="nav-item-text">
@@ -35,27 +36,32 @@
           <div class="nav-item-sub">Lihat riwayat tanya jawab Anda</div>
         </div>
       </a>
-      <a href="#" class="nav-item">
-        <span class="nav-item-icon">📋</span>
-        <div class="nav-item-text">
-          <div class="nav-item-label">Topik</div>
-          <div class="nav-item-sub">Pilih topik hukum lalu lintas</div>
-        </div>
-      </a>
-      <a href="#" class="nav-item">
+      @endauth
+      <a href="{{ route('guide.index') }}" class="nav-item">
         <span class="nav-item-icon">📘</span>
         <div class="nav-item-text">
           <div class="nav-item-label">Panduan &amp; Info</div>
           <div class="nav-item-sub">Informasi hukum lalu lintas</div>
         </div>
       </a>
-      <a href="#" class="nav-item">
+      <a href="{{ route('about.index') }}" class="nav-item">
         <span class="nav-item-icon">🤖</span>
         <div class="nav-item-text">
           <div class="nav-item-label">Tentang LENTRA AI</div>
           <div class="nav-item-sub">Pelajari lebih lanjut</div>
         </div>
       </a>
+      @auth
+        @if(auth()->user()->is_admin)
+        <a href="{{ route('admin.regulations.index') }}" class="nav-item">
+          <span class="nav-item-icon">🗂️</span>
+          <div class="nav-item-text">
+            <div class="nav-item-label">Admin Regulasi</div>
+            <div class="nav-item-sub">Kelola dokumen RAG</div>
+          </div>
+        </a>
+        @endif
+      @endauth
     </nav>
 
     <div class="sidebar-footer">
@@ -81,10 +87,24 @@
         </a>
       </div>
       <div class="header-actions">
+        @auth
         <button class="btn-history" onclick="toggleHistory(event)">
           🕐 Riwayat
         </button>
-        <button class="avatar-btn" id="userAvatar" title="User">U</button>
+        <div class="user-menu">
+          <button class="avatar-btn" id="userAvatar" title="{{ auth()->user()->name }}">
+            {{ strtoupper(substr(auth()->user()->name, 0, 1)) }}
+          </button>
+          <span class="user-name">{{ auth()->user()->name }}</span>
+          <form action="{{ route('logout') }}" method="POST">
+            @csrf
+            <button type="submit" class="btn-auth-link">Logout</button>
+          </form>
+        </div>
+        @else
+        <a href="{{ route('login') }}" class="btn-auth-link">Login</a>
+        <a href="{{ route('register') }}" class="btn-auth-primary">Register</a>
+        @endauth
       </div>
     </header>
 
@@ -129,7 +149,16 @@
                     <span class="msg-time">{{ $msg->created_at->format('H:i') }}</span>
                   </div>
                   <div class="msg-bubble ai">{{ $msg->content }}</div>
-                  @if($msg->pasal || $msg->sanksi)
+                  @php
+                    $references = $msg->legal_references ?? [];
+                    $primaryReference = $references[0] ?? [];
+                    $sourceText = collect([
+                      $primaryReference['title'] ?? null,
+                      $primaryReference['source'] ?? null,
+                      $primaryReference['topic'] ?? null,
+                    ])->filter()->implode(' · ');
+                  @endphp
+                  @if($msg->pasal || $msg->sanksi || $sourceText)
                   <div class="ref-cards">
                     @if($msg->pasal)
                     <div class="ref-card pasal">
@@ -146,6 +175,15 @@
                       <div class="ref-card-content">
                         <div class="ref-card-label">Sanksi</div>
                         <div class="ref-card-value">{{ $msg->sanksi }}</div>
+                      </div>
+                    </div>
+                    @endif
+                    @if($sourceText)
+                    <div class="ref-card source-ref">
+                      <div class="ref-card-icon">📚</div>
+                      <div class="ref-card-content">
+                        <div class="ref-card-label">Sumber Regulasi</div>
+                        <div class="ref-card-value">{{ $sourceText }}</div>
                       </div>
                     </div>
                     @endif
@@ -178,23 +216,29 @@
 
       {{-- Topic Tags --}}
       <div class="topic-tags">
-        <button class="topic-tag" onclick="sendQuickMessage('Apa aturan tilang motor?')">
+        <button class="topic-tag" data-topic="tilang" onclick="sendTopicMessage(this, 'Apa prosedur tilang kendaraan bermotor dan apa hak pengendara saat ditilang menurut aturan lalu lintas Indonesia?')">
           <span class="topic-tag-icon">📄</span> Tilang
         </button>
-        <button class="topic-tag" onclick="sendQuickMessage('Apa kewajiban memiliki STNK?')">
+        <button class="topic-tag" data-topic="stnk" onclick="sendTopicMessage(this, 'Apa sanksi jika mengemudikan kendaraan bermotor tanpa membawa STNK yang sah?')">
           <span class="topic-tag-icon">📋</span> STNK
         </button>
-        <button class="topic-tag" onclick="sendQuickMessage('Apa aturan SIM kendaraan bermotor?')">
+        <button class="topic-tag" data-topic="sim" onclick="sendTopicMessage(this, 'Apa sanksi bagi pengendara yang tidak memiliki SIM saat mengemudikan kendaraan bermotor?')">
           <span class="topic-tag-icon">🪪</span> SIM
         </button>
-        <button class="topic-tag" onclick="sendQuickMessage('Apa aturan parkir di jalan?')">
+        <button class="topic-tag" data-topic="helm" onclick="sendTopicMessage(this, 'Apa kewajiban memakai helm SNI bagi pengendara dan penumpang sepeda motor, serta apa sanksinya?')">
+          <span class="topic-tag-icon">🪖</span> Helm
+        </button>
+        <button class="topic-tag" data-topic="parkir" onclick="sendTopicMessage(this, 'Apa aturan dan sanksi parkir sembarangan yang mengganggu arus lalu lintas atau melanggar rambu?')">
           <span class="topic-tag-icon">🅿️</span> Parkir
         </button>
-        <button class="topic-tag" onclick="sendQuickMessage('Bagaimana hukum kecelakaan lalu lintas?')">
+        <button class="topic-tag" data-topic="kecelakaan" onclick="sendTopicMessage(this, 'Apa kewajiban pengemudi setelah terlibat kecelakaan lalu lintas dan apa sanksi jika melarikan diri?')">
           <span class="topic-tag-icon">⚠️</span> Kecelakaan
         </button>
-        <button class="topic-tag" onclick="sendQuickMessage('Apa sanksi melanggar lampu merah?')">
-          <span class="topic-tag-icon">🚦</span> Lampu Merah
+        <button class="topic-tag" data-topic="rambu" onclick="sendTopicMessage(this, 'Apa sanksi menerobos lampu merah atau melanggar rambu lalu lintas?')">
+          <span class="topic-tag-icon">🚦</span> Rambu
+        </button>
+        <button class="topic-tag" data-topic="kecepatan" onclick="sendTopicMessage(this, 'Apa aturan batas kecepatan kendaraan di jalan dan apa sanksi jika melanggarnya?')">
+          <span class="topic-tag-icon">🛣️</span> Kecepatan
         </button>
       </div>
 
@@ -233,6 +277,7 @@
   </main>
 </div>
 
+@auth
 {{-- ══════════ HISTORY PANEL ══════════ --}}
 <div class="history-panel" id="historyPanel" onclick="closeHistoryOnBg(event)">
   <div class="history-drawer">
@@ -246,6 +291,7 @@
     </div>
   </div>
 </div>
+@endauth
 
 {{-- Toast --}}
 <div class="toast" id="toast"></div>
@@ -256,11 +302,12 @@
     sessionId: '{{ $sessionId }}',
     sendUrl: '{{ route("chat.send") }}',
     streamUrl: '{{ route("chat.stream") }}',
-    newSessionUrl: '{{ route("chat.new-session") }}',
-    historyUrl: '{{ route("chat.history") }}',
-    switchUrl: '{{ url("/chat/switch") }}',
+    newSessionUrl: @auth '{{ route("chat.new-session") }}' @else null @endauth,
+    historyUrl: @auth '{{ route("chat.history") }}' @else null @endauth,
+    switchUrl: @auth '{{ url("/chat/switch") }}' @else null @endauth,
     validateUrl: '{{ route("chat.validate-input") }}',
     csrfToken: '{{ csrf_token() }}',
+    isAuthenticated: @json(auth()->check()),
   };
 </script>
 @endsection
