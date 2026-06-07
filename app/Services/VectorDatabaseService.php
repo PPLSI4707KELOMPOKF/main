@@ -84,6 +84,69 @@ class VectorDatabaseService
     }
 
     /**
+     * Fallback local retrieval when embeddings/Ollama are unavailable.
+     */
+    public function searchByText(string $query, int $limit = 3): array
+    {
+        $documents = $this->loadDatabase();
+        $terms = $this->tokenize($query);
+
+        if (empty($documents) || empty($terms)) {
+            return [];
+        }
+
+        $results = [];
+
+        foreach ($documents as $doc) {
+            $metadata = $doc['metadata'] ?? [];
+            $haystack = mb_strtolower(implode(' ', [
+                $doc['content'] ?? '',
+                $metadata['pasal'] ?? '',
+                $metadata['topic'] ?? '',
+                $metadata['topik'] ?? '',
+                $metadata['title'] ?? '',
+                $metadata['source'] ?? '',
+            ]));
+
+            $score = 0;
+            foreach ($terms as $term) {
+                if (str_contains($haystack, $term)) {
+                    $score++;
+                }
+            }
+
+            if ($score > 0) {
+                $results[] = [
+                    'id' => $doc['id'],
+                    'content' => $doc['content'],
+                    'metadata' => $metadata,
+                    'score' => round($score / count($terms), 4),
+                ];
+            }
+        }
+
+        usort($results, function ($a, $b) {
+            return $b['score'] <=> $a['score'];
+        });
+
+        return array_slice($results, 0, $limit);
+    }
+
+    /**
+     * Remove all vector entries generated from a regulation document.
+     */
+    public function deleteByDocumentId(int|string $documentId): void
+    {
+        $documents = $this->loadDatabase();
+
+        $documents = array_filter($documents, function ($doc) use ($documentId) {
+            return (string) ($doc['metadata']['document_id'] ?? '') !== (string) $documentId;
+        });
+
+        $this->saveDatabase(array_values($documents));
+    }
+
+    /**
      * Load the database from storage.
      */
     protected function loadDatabase(): array
@@ -104,6 +167,16 @@ class VectorDatabaseService
     protected function saveDatabase(array $documents): void
     {
         Storage::put($this->storagePath, json_encode($documents));
+    }
+
+    protected function tokenize(string $text): array
+    {
+        $words = preg_split('/[^\pL\pN]+/u', mb_strtolower($text), -1, PREG_SPLIT_NO_EMPTY);
+        $stopWords = ['apa', 'yang', 'dan', 'atau', 'jika', 'saya', 'di', 'ke', 'dengan', 'untuk', 'bagi', 'saat', 'adalah'];
+
+        return array_values(array_unique(array_filter($words, function ($word) use ($stopWords) {
+            return mb_strlen($word) >= 3 && !in_array($word, $stopWords, true);
+        })));
     }
 
     /**
