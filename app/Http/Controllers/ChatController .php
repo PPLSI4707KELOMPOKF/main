@@ -11,6 +11,7 @@ use App\Services\ApiResponseFormatter;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
 
 class ChatController extends Controller
 {
@@ -35,19 +36,29 @@ class ChatController extends Controller
             $request->session()->put('chat_session_id', $sessionId);
         }
 
-        $chatSession = ChatSession::firstOrCreate(
-            ['session_id' => $sessionId],
-            ['title' => 'Percakapan Baru', 'user_id' => null]
-        );
+        $chatSession = null;
+        $messages = collect();
+        $allSessions = collect();
 
-        $messages = $chatSession->messages()->get();
+        if (Auth::check()) {
+            $chatSession = ChatSession::where('session_id', $sessionId)
+                ->where('user_id', Auth::id())
+                ->first();
 
-        $allSessions = ChatSession::where('session_id', $sessionId)
-            ->orWhereNull('user_id')
-            ->with('messages')
-            ->orderBy('updated_at', 'desc')
-            ->limit(20)
-            ->get();
+            if (!$chatSession) {
+                $sessionId = Str::uuid()->toString();
+                $request->session()->put('chat_session_id', $sessionId);
+            }
+
+            $messages = $chatSession?->messages()->get() ?? collect();
+
+            $allSessions = ChatSession::where('user_id', Auth::id())
+                ->whereHas('messages')
+                ->with('messages')
+                ->orderBy('updated_at', 'desc')
+                ->limit(20)
+                ->get();
+        }
 
         return view('chat.index', compact('chatSession', 'messages', 'allSessions', 'sessionId'));
     }
@@ -95,28 +106,33 @@ class ChatController extends Controller
         try {
             $sessionId   = $request->input('session_id');
             $userMessage = $request->input('message');
+            $isAuthenticated = Auth::check();
 
-            // Get or create chat session
-            $chatSession = ChatSession::firstOrCreate(
-                ['session_id' => $sessionId],
-                ['title' => 'Percakapan Baru', 'user_id' => null]
-            );
+            $chatSession = null;
+            $userMsg = null;
 
-            // Update title if first message
-            if ($chatSession->messages()->count() === 0) {
-                $title = Str::limit($userMessage, 40);
-                $chatSession->update(['title' => $title]);
+            if ($isAuthenticated) {
+                // Get or create an owned chat session.
+                $chatSession = $this->getOrCreateOwnedSession($request, $sessionId);
+                $sessionId = $chatSession->session_id;
+
+                // Update title if first message.
+                if ($chatSession->messages()->count() === 0) {
+                    $title = Str::limit($userMessage, 40);
+                    $chatSession->update(['title' => $title]);
+                }
+
+                // Save user message for authenticated users only.
+                $userMsg = ChatMessage::create([
+                    'chat_session_id' => $chatSession->id,
+                    'role' => 'user',
+                    'content' => $userMessage,
+                ]);
             }
-
-            // Save user message
-            $userMsg = ChatMessage::create([
-                'chat_session_id' => $chatSession->id,
-                'role' => 'user',
-                'content' => $userMessage,
-            ]);
 
             Log::info('[PBI-2] User question received', [
                 'session_id'  => $sessionId,
+                'user_id'     => Auth::id(),
                 'char_count'  => mb_strlen($userMessage),
                 'word_count'  => str_word_count($userMessage),
             ]);
@@ -126,38 +142,46 @@ class ChatController extends Controller
             // ========================================
             $aiResponse = $this->processWithAI($userMessage, $chatSession);
 
-            // Save AI response
-            $assistantMsg = ChatMessage::create([
-                'chat_session_id' => $chatSession->id,
-                'role' => 'assistant',
-                'content' => $aiResponse['message'],
-                'pasal' => $aiResponse['pasal'] ?? null,
-                'sanksi' => $aiResponse['sanksi'] ?? null,
-            ]);
+            $assistantMsg = null;
 
-            $chatSession->touch();
+            if ($chatSession) {
+                // Save AI response for authenticated users only.
+                $assistantMsg = ChatMessage::create([
+                    'chat_session_id' => $chatSession->id,
+                    'role' => 'assistant',
+                    'content' => $aiResponse['message'],
+                    'pasal' => $aiResponse['pasal'] ?? null,
+                    'sanksi' => $aiResponse['sanksi'] ?? null,
+                    'legal_references' => $aiResponse['references'] ?? [],
+                ]);
+
+                $chatSession->touch();
+            }
 
             $modelName = $aiResponse['model'] ?? config('ollama.model');
 
             $formatted = ApiResponseFormatter::formatSuccess(
-                $assistantMsg->content,
+                $aiResponse['message'],
                 $modelName,
                 [
                     'user_message' => [
-                        'id' => $userMsg->id,
+                        'id' => $userMsg?->id,
                         'role' => 'user',
-                        'content' => $userMsg->content,
-                        'time' => $userMsg->created_at->format('H:i'),
+                        'content' => $userMsg?->content ?? $userMessage,
+                        'time' => $userMsg?->created_at?->format('H:i') ?? now()->format('H:i'),
                     ],
                     'assistant_message' => [
-                        'id' => $assistantMsg->id,
+                        'id' => $assistantMsg?->id,
                         'role' => 'assistant',
-                        'content' => $assistantMsg->content,
-                        'pasal' => $assistantMsg->pasal,
-                        'sanksi' => $assistantMsg->sanksi,
-                        'time' => $assistantMsg->created_at->format('H:i'),
+                        'content' => $assistantMsg?->content ?? $aiResponse['message'],
+                        'pasal' => $assistantMsg?->pasal ?? ($aiResponse['pasal'] ?? null),
+                        'sanksi' => $assistantMsg?->sanksi ?? ($aiResponse['sanksi'] ?? null),
+                        'references' => $assistantMsg?->legal_references ?? ($aiResponse['references'] ?? []),
+                        'time' => $assistantMsg?->created_at?->format('H:i') ?? now()->format('H:i'),
                     ],
-                    'session_title' => $chatSession->title,
+                    'session_title' => $chatSession?->title ?? 'Percakapan Sementara',
+                    'session_id' => $sessionId,
+                    'persisted' => $isAuthenticated,
                 ]
             );
 
@@ -195,21 +219,28 @@ class ChatController extends Controller
 
         $sessionId   = $request->input('session_id');
         $userMessage = $request->input('message');
+        $isAuthenticated = Auth::check();
 
-        $chatSession = ChatSession::firstOrCreate(
-            ['session_id' => $sessionId],
-            ['title' => 'Percakapan Baru', 'user_id' => null]
-        );
+        $chatSession = null;
+        $userMsg = null;
+        $sessionTitle = 'Percakapan Sementara';
 
-        if ($chatSession->messages()->count() === 0) {
-            $chatSession->update(['title' => Str::limit($userMessage, 40)]);
+        if ($isAuthenticated) {
+            $chatSession = $this->getOrCreateOwnedSession($request, $sessionId);
+            $sessionId = $chatSession->session_id;
+
+            if ($chatSession->messages()->count() === 0) {
+                $chatSession->update(['title' => Str::limit($userMessage, 40)]);
+            }
+
+            $sessionTitle = $chatSession->title;
+
+            $userMsg = ChatMessage::create([
+                'chat_session_id' => $chatSession->id,
+                'role'            => 'user',
+                'content'         => $userMessage,
+            ]);
         }
-
-        $userMsg = ChatMessage::create([
-            'chat_session_id' => $chatSession->id,
-            'role'            => 'user',
-            'content'         => $userMessage,
-        ]);
 
         $preprocessor     = app(\App\Services\InputPreprocessor::class);
         $cleanedMessage   = $preprocessor->clean($userMessage);
@@ -218,19 +249,24 @@ class ChatController extends Controller
         $relevanceData = $preprocessor->checkRelevance($cleanedMessage);
         if (!$relevanceData['is_relevant']) {
             $rejectMsg = 'Maaf, saya hanya dapat membantu pertanyaan seputar hukum lalu lintas Indonesia. Silakan tanyakan tentang SIM, STNK, helm, tilang, rambu, parkir, atau aturan berkendara.';
-            $assistantMsg = ChatMessage::create([
-                'chat_session_id' => $chatSession->id,
-                'role'            => 'assistant',
-                'content'         => $rejectMsg,
-                'pasal'           => null,
-                'sanksi'          => null,
-            ]);
-            return response()->stream(function () use ($userMsg, $chatSession, $assistantMsg, $rejectMsg) {
-                echo "data: " . json_encode(['type' => 'user_saved', 'id' => $userMsg->id, 'time' => $userMsg->created_at->format('H:i'), 'session_title' => $chatSession->title]) . "\n\n";
+            $assistantMsg = null;
+            if ($chatSession) {
+                $assistantMsg = ChatMessage::create([
+                    'chat_session_id' => $chatSession->id,
+                    'role'            => 'assistant',
+                    'content'         => $rejectMsg,
+                    'pasal'           => null,
+                    'sanksi'          => null,
+                    'legal_references' => [],
+                ]);
+                $chatSession->touch();
+            }
+            return response()->stream(function () use ($userMsg, $sessionId, $sessionTitle, $assistantMsg, $rejectMsg, $isAuthenticated) {
+                echo "data: " . json_encode(['type' => 'user_saved', 'id' => $userMsg?->id, 'time' => $userMsg?->created_at?->format('H:i') ?? now()->format('H:i'), 'session_id' => $sessionId, 'session_title' => $sessionTitle, 'persisted' => $isAuthenticated]) . "\n\n";
                 ob_flush(); flush();
                 echo "data: " . json_encode(['type' => 'token', 'token' => $rejectMsg]) . "\n\n";
                 ob_flush(); flush();
-                echo "data: " . json_encode(['type' => 'done', 'id' => $assistantMsg->id, 'time' => $assistantMsg->created_at->format('H:i'), 'pasal' => null, 'sanksi' => null, 'success' => true]) . "\n\n";
+                echo "data: " . json_encode(['type' => 'done', 'id' => $assistantMsg?->id, 'time' => $assistantMsg?->created_at?->format('H:i') ?? now()->format('H:i'), 'pasal' => null, 'sanksi' => null, 'success' => true, 'persisted' => $isAuthenticated]) . "\n\n";
                 ob_flush(); flush();
             }, 200, ['Content-Type' => 'text/event-stream', 'Cache-Control' => 'no-cache', 'X-Accel-Buffering' => 'no']);
         }
@@ -243,6 +279,10 @@ class ChatController extends Controller
             $topK = config('rag.top_k', 3);
             $vectorDb = app(\App\Services\VectorDatabaseService::class);
             $relevantDocs = $vectorDb->search($embedding, $topK);
+        } else {
+            $topK = config('rag.top_k', 3);
+            $vectorDb = app(\App\Services\VectorDatabaseService::class);
+            $relevantDocs = $vectorDb->searchByText($cleanedMessage, $topK);
         }
 
         $context             = $this->contextBuilder->build($cleanedMessage, $relevantDocs, $chatSession);
@@ -251,13 +291,15 @@ class ChatController extends Controller
 
         return response()->stream(function () use (
             $ollamaService, $cleanedMessage, $context, $conversationHistory,
-            $chatSession, $userMsg
+            $chatSession, $userMsg, $sessionId, $sessionTitle, $isAuthenticated, $relevantDocs
         ) {
             echo "data: " . json_encode([
                 'type'          => 'user_saved',
-                'id'            => $userMsg->id,
-                'time'          => $userMsg->created_at->format('H:i'),
-                'session_title' => $chatSession->title,
+                'id'            => $userMsg?->id,
+                'time'          => $userMsg?->created_at?->format('H:i') ?? now()->format('H:i'),
+                'session_id'    => $sessionId,
+                'session_title' => $sessionTitle,
+                'persisted'     => $isAuthenticated,
             ]) . "\n\n";
             ob_flush(); flush();
 
@@ -272,34 +314,36 @@ class ChatController extends Controller
                     echo "data: " . json_encode(['type' => 'token', 'token' => $token]) . "\n\n";
                     ob_flush(); flush();
                 },
-                function (string $content, bool $success) use ($chatSession, &$fullContent) {
-                    $finalContent = $success ? $content : ($fullContent ?: 'Maaf, AI tidak dapat merespons. Pastikan Ollama berjalan.');
+                function (string $content, bool $success) use ($chatSession, &$fullContent, $isAuthenticated, $cleanedMessage, $relevantDocs) {
+                    $finalContent = $success ? $content : $this->buildOfflineAnswer($cleanedMessage, $relevantDocs, $fullContent);
+                    $references = $this->extractReferences($finalContent, $relevantDocs);
+                    $primary = $this->primaryReference($references);
+                    $pasal = $primary['pasal'] ?? null;
+                    $sanksi = $primary['sanksi'] ?? null;
 
-                    $pasal = null;
-                    $sanksi = null;
-                    if (preg_match('/[Pp]asal\\s+(\\d+[A-Za-z]?(?:\\s*(?:ayat|huruf)\\s*\\([^)]+\\))?)/u', $finalContent, $m)) {
-                        $pasal = 'Pasal ' . $m[1];
+                    $assistantMsg = null;
+                    if ($chatSession) {
+                        $assistantMsg = ChatMessage::create([
+                            'chat_session_id' => $chatSession->id,
+                            'role'            => 'assistant',
+                            'content'         => $finalContent,
+                            'pasal'           => $pasal,
+                            'sanksi'          => $sanksi,
+                            'legal_references' => $references,
+                        ]);
+                        $chatSession->touch();
                     }
-                    if (preg_match('/(?:pidana penjara|denda|kurungan)[^.]+\\./u', $finalContent, $m)) {
-                        $sanksi = ucfirst(trim($m[0]));
-                    }
-
-                    $assistantMsg = ChatMessage::create([
-                        'chat_session_id' => $chatSession->id,
-                        'role'            => 'assistant',
-                        'content'         => $finalContent,
-                        'pasal'           => $pasal,
-                        'sanksi'          => $sanksi,
-                    ]);
-                    $chatSession->touch();
 
                     echo "data: " . json_encode([
                         'type'    => 'done',
-                        'id'      => $assistantMsg->id,
-                        'time'    => $assistantMsg->created_at->format('H:i'),
+                        'id'      => $assistantMsg?->id,
+                        'time'    => $assistantMsg?->created_at?->format('H:i') ?? now()->format('H:i'),
                         'pasal'   => $pasal,
                         'sanksi'  => $sanksi,
-                        'success' => $success,
+                        'references' => $references,
+                        'success' => true,
+                        'offline' => !$success,
+                        'persisted' => $isAuthenticated,
                     ]) . "\n\n";
                     ob_flush(); flush();
                 }
@@ -320,12 +364,6 @@ class ChatController extends Controller
         $sessionId = Str::uuid()->toString();
         $request->session()->put('chat_session_id', $sessionId);
 
-        ChatSession::create([
-            'session_id' => $sessionId,
-            'title' => 'Percakapan Baru',
-            'user_id' => null,
-        ]);
-
         return response()->json([
             'success' => true,
             'session_id' => $sessionId,
@@ -337,7 +375,9 @@ class ChatController extends Controller
      */
     public function switchSession(Request $request, $sessionId)
     {
-        $chatSession = ChatSession::where('session_id', $sessionId)->firstOrFail();
+        $chatSession = ChatSession::where('session_id', $sessionId)
+            ->where('user_id', Auth::id())
+            ->firstOrFail();
         $request->session()->put('chat_session_id', $sessionId);
 
         $messages = $chatSession->messages()->get()->map(function ($msg) {
@@ -347,6 +387,7 @@ class ChatController extends Controller
                 'content' => $msg->content,
                 'pasal' => $msg->pasal,
                 'sanksi' => $msg->sanksi,
+                'references' => $msg->legal_references ?? [],
                 'time' => $msg->created_at->format('H:i'),
             ];
         });
@@ -364,18 +405,20 @@ class ChatController extends Controller
      */
     public function getHistory(Request $request)
     {
-        $sessions = ChatSession::whereNull('user_id')
-            ->with(['messages' => function ($q) {
-                $q->orderBy('created_at', 'desc')->limit(1);
-            }])
+        $sessions = ChatSession::where('user_id', Auth::id())
+            ->whereHas('messages')
             ->orderBy('updated_at', 'desc')
             ->limit(20)
             ->get()
             ->map(function ($session) {
+                $lastMessage = $session->messages()
+                    ->reorder('created_at', 'desc')
+                    ->first();
+
                 return [
                     'session_id' => $session->session_id,
                     'title' => $session->title,
-                    'last_message' => $session->messages->first()?->content ?? '',
+                    'last_message' => $lastMessage?->content ?? '',
                     'updated_at' => $session->updated_at->format('d M Y'),
                 ];
             });
@@ -398,6 +441,28 @@ class ChatController extends Controller
             'message'    => $isAvailable
                 ? 'Ollama berjalan dengan baik.'
                 : 'Pastikan Ollama berjalan menggunakan command: ollama serve',
+            ]);
+    }
+
+    private function getOrCreateOwnedSession(Request $request, string $sessionId): ChatSession
+    {
+        $chatSession = ChatSession::where('session_id', $sessionId)
+            ->where('user_id', Auth::id())
+            ->first();
+
+        if ($chatSession) {
+            return $chatSession;
+        }
+
+        if (ChatSession::where('session_id', $sessionId)->exists()) {
+            $sessionId = Str::uuid()->toString();
+            $request->session()->put('chat_session_id', $sessionId);
+        }
+
+        return ChatSession::create([
+            'session_id' => $sessionId,
+            'title' => 'Percakapan Baru',
+            'user_id' => Auth::id(),
         ]);
     }
 
@@ -410,7 +475,7 @@ class ChatController extends Controller
      * PBI-7: Penyusunan context
      * OllamaService: Kirim ke AI dengan retry, fallback, anti-repeat
      */
-    private function processWithAI(string $userMessage, ChatSession $session): array
+    private function processWithAI(string $userMessage, ?ChatSession $session): array
     {
         // PBI-3: Clean and preprocess user message
         $preprocessor   = app(\App\Services\InputPreprocessor::class);
@@ -421,7 +486,7 @@ class ChatController extends Controller
         $relevanceData = $preprocessor->checkRelevance($cleanedMessage);
         if (!$relevanceData['is_relevant']) {
             Log::info('[Guard] Off-topic question rejected', [
-                'session_id' => $session->session_id,
+                'session_id' => $session?->session_id ?? 'guest',
                 'message'    => mb_substr($cleanedMessage, 0, 80),
             ]);
             return [
@@ -430,6 +495,7 @@ class ChatController extends Controller
                 'model'   => 'guard',
                 'pasal'   => null,
                 'sanksi'  => null,
+                'references' => [],
             ];
         }
 
@@ -441,7 +507,7 @@ class ChatController extends Controller
 
         if ($embedding) {
             Log::info('[PBI-4] Successfully generated embedding in ChatController', [
-                'session_id' => $session->session_id,
+                'session_id' => $session?->session_id ?? 'guest',
             ]);
 
             // PBI-6: Pengambilan Dokumen Relevan (Top-K)
@@ -451,7 +517,7 @@ class ChatController extends Controller
 
             if (!empty($relevantDocs)) {
                 Log::info('[PBI-6] Retrieved relevant documents', [
-                    'session_id' => $session->session_id,
+                    'session_id' => $session?->session_id ?? 'guest',
                     'count' => count($relevantDocs),
                     'top_score' => $relevantDocs[0]['score'],
                     'top_pasal' => $relevantDocs[0]['metadata']['pasal'] ?? 'Unknown',
@@ -459,10 +525,20 @@ class ChatController extends Controller
                 ]);
             } else {
                 Log::info('[PBI-6] No relevant documents found', [
-                    'session_id' => $session->session_id,
+                    'session_id' => $session?->session_id ?? 'guest',
                     'top_k' => $topK,
                 ]);
             }
+        } else {
+            $topK = config('rag.top_k', 3);
+            $vectorDb = app(\App\Services\VectorDatabaseService::class);
+            $relevantDocs = $vectorDb->searchByText($cleanedMessage, $topK);
+
+            Log::info('[PBI-13] Embedding unavailable, using local text retrieval', [
+                'session_id' => $session?->session_id ?? 'guest',
+                'count' => count($relevantDocs),
+                'top_k' => $topK,
+            ]);
         }
 
         // PBI-7: Penyusunan Context — RAG documents
@@ -475,7 +551,7 @@ class ChatController extends Controller
         $result = $this->ollamaService->chat($cleanedMessage, $context, $conversationHistory);
 
         Log::info('[OllamaService] Final response', [
-            'session_id' => $session->session_id,
+            'session_id' => $session?->session_id ?? 'guest',
             'success'    => $result['success'],
             'model'      => $result['model'],
         ]);
@@ -483,19 +559,125 @@ class ChatController extends Controller
         // Jika AI gagal total, gunakan simulated response sebagai safety net
         if (!$result['success']) {
             Log::warning('[OllamaService] Using simulated fallback response', [
-                'session_id' => $session->session_id,
+                'session_id' => $session?->session_id ?? 'guest',
             ]);
             $simulated = $this->getSimulatedResponse($userMessage);
             return [
                 'success' => true,
-                'message' => $simulated['content'],
-                'model'   => 'simulated',
-                'pasal'   => $simulated['pasal'],
-                'sanksi'  => $simulated['sanksi'],
+                'message' => $this->buildOfflineAnswer($cleanedMessage, $relevantDocs, $simulated['content']),
+                'model'   => !empty($relevantDocs) ? 'offline-rag' : 'simulated',
+                'pasal'   => $this->primaryReference($this->extractReferences($simulated['content'], $relevantDocs))['pasal'] ?? $simulated['pasal'],
+                'sanksi'  => $this->primaryReference($this->extractReferences($simulated['content'], $relevantDocs))['sanksi'] ?? $simulated['sanksi'],
+                'references' => $this->extractReferences($simulated['content'], $relevantDocs),
             ];
         }
 
-        return $result;
+        $references = $this->extractReferences($result['message'] ?? '', $relevantDocs);
+        $primary = $this->primaryReference($references);
+
+        return array_merge($result, [
+            'pasal' => $result['pasal'] ?? ($primary['pasal'] ?? null),
+            'sanksi' => $result['sanksi'] ?? ($primary['sanksi'] ?? null),
+            'references' => $references,
+        ]);
+    }
+
+    private function extractReferences(string $answer, array $relevantDocs = []): array
+    {
+        $references = [];
+
+        $answerPasal = $this->extractPasalFromText($answer);
+        $answerSanksi = $this->extractSanksiFromText($answer);
+
+        foreach ($relevantDocs as $doc) {
+            $metadata = $doc['metadata'] ?? [];
+            $pasal = $metadata['pasal'] ?? null;
+            $source = $metadata['source'] ?? 'UU No. 22 Tahun 2009';
+            $title = $metadata['title'] ?? null;
+            $topic = $metadata['topic'] ?? ($metadata['topik'] ?? null);
+            $chunkUid = $metadata['chunk_uid'] ?? ($doc['id'] ?? null);
+
+            if (!$pasal && !$source && !$title && !$topic) {
+                continue;
+            }
+
+            $references[] = [
+                'pasal' => $pasal,
+                'sanksi' => $answerSanksi,
+                'source' => $source,
+                'title' => $title,
+                'topic' => $topic,
+                'chunk_uid' => $chunkUid,
+                'score' => isset($doc['score']) ? round((float) $doc['score'], 4) : null,
+            ];
+        }
+
+        if (empty($references) && ($answerPasal || $answerSanksi)) {
+            $references[] = [
+                'pasal' => $answerPasal,
+                'sanksi' => $answerSanksi,
+                'source' => 'UU No. 22 Tahun 2009',
+                'title' => null,
+                'topic' => null,
+                'chunk_uid' => null,
+                'score' => null,
+            ];
+        }
+
+        if (!empty($references) && $answerPasal && empty($references[0]['pasal'])) {
+            $references[0]['pasal'] = $answerPasal;
+        }
+
+        return array_values($references);
+    }
+
+    private function primaryReference(array $references): array
+    {
+        return $references[0] ?? [];
+    }
+
+    private function buildOfflineAnswer(string $userMessage, array $relevantDocs, string $fallbackContent = ''): string
+    {
+        if (empty($relevantDocs)) {
+            return $fallbackContent ?: $this->getSimulatedResponse($userMessage)['content'];
+        }
+
+        $lines = [
+            'Mode offline aktif. Berdasarkan dokumen regulasi lokal yang paling relevan, berikut ringkasan jawabannya:',
+        ];
+
+        foreach (array_slice($relevantDocs, 0, 2) as $index => $doc) {
+            $metadata = $doc['metadata'] ?? [];
+            $pasal = $metadata['pasal'] ?? 'Referensi regulasi';
+            $source = $metadata['source'] ?? 'UU No. 22 Tahun 2009';
+            $title = $metadata['title'] ?? ($metadata['topic'] ?? ($metadata['topik'] ?? 'Hukum lalu lintas'));
+            $content = trim((string) ($doc['content'] ?? ''));
+            $excerpt = Str::limit(preg_replace('/\s+/', ' ', $content), 260);
+
+            $lines[] = ($index + 1) . ". {$pasal} - {$title} ({$source}): {$excerpt}";
+        }
+
+        $lines[] = 'Gunakan jawaban ini sebagai informasi awal. Untuk keputusan hukum resmi, ikuti prosedur kepolisian/pengadilan atau konsultasikan kepada ahli.';
+
+        return implode("\n\n", $lines);
+    }
+
+    private function extractPasalFromText(string $text): ?string
+    {
+        if (preg_match('/[Pp]asal\s+(\d+[A-Za-z]?(?:\s*(?:ayat|huruf)\s*\([^)]+\))?)/u', $text, $matches)) {
+            return 'Pasal ' . $matches[1];
+        }
+
+        return null;
+    }
+
+    private function extractSanksiFromText(string $text): ?string
+    {
+        if (preg_match('/(?:pidana penjara|pidana kurungan|dipidana|pidana|denda|kurungan).*?\.(?:\s|$)/ui', $text, $matches)) {
+            return ucfirst(trim($matches[0]));
+        }
+
+        return null;
     }
 
     /**
