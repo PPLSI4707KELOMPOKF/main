@@ -22,10 +22,10 @@ class ContextBuilderService
      *
      * @param string $userMessage Pertanyaan pengguna yang sudah dibersihkan
      * @param array $relevantDocs Dokumen relevan hasil pencarian RAG (PBI-6)
-     * @param ChatSession $session Sesi chat untuk riwayat percakapan
+     * @param ChatSession|null $session Sesi chat untuk riwayat percakapan
      * @return string Context yang akan diinjeksi ke system prompt
      */
-    public function build(string $userMessage, array $relevantDocs, ChatSession $session): string
+    public function build(string $userMessage, array $relevantDocs, ?ChatSession $session): string
     {
         $parts = [];
 
@@ -38,7 +38,7 @@ class ContextBuilderService
         $context = implode("\n\n", $parts);
 
         Log::info('[PBI-7] Context built successfully', [
-            'session_id'       => $session->session_id,
+            'session_id'       => $session?->session_id ?? 'guest',
             'context_length'   => mb_strlen($context),
             'documents_count'  => count($relevantDocs),
         ]);
@@ -49,11 +49,15 @@ class ContextBuilderService
     /**
      * Ambil riwayat percakapan sebagai array messages untuk OllamaService.
      *
-     * @param ChatSession $session
+     * @param ChatSession|null $session
      * @return array
      */
-    public function getConversationHistory(ChatSession $session): array
+    public function getConversationHistory(?ChatSession $session): array
     {
+        if (!$session) {
+            return [];
+        }
+
         return $session->messages()
             ->reorder('created_at', 'desc')
             ->limit(6)
@@ -83,11 +87,19 @@ class ContextBuilderService
         foreach ($relevantDocs as $index => $doc) {
             $num     = $index + 1;
             $pasal   = $doc['metadata']['pasal'] ?? 'Tidak diketahui';
-            $topik   = $doc['metadata']['topik'] ?? '';
+            $topik   = $doc['metadata']['topic'] ?? ($doc['metadata']['topik'] ?? '');
+            $title   = $doc['metadata']['title'] ?? null;
+            $source  = $doc['metadata']['source'] ?? null;
             $content = $doc['content'] ?? '';
             $score   = isset($doc['score']) ? round($doc['score'], 4) : '-';
 
             $lines[] = "[Dokumen {$num}] {$pasal}" . ($topik ? " — {$topik}" : '') . " (skor: {$score})";
+            if ($title) {
+                $lines[] = "Judul: {$title}";
+            }
+            if ($source) {
+                $lines[] = "Sumber: {$source}";
+            }
             $lines[] = $content;
         }
 
