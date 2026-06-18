@@ -16,6 +16,11 @@ class ChatMessage extends Model
         'content',
         'pasal',
         'sanksi',
+        'legal_references',
+    ];
+
+    protected $casts = [
+        'legal_references' => 'array',
     ];
 
     /**
